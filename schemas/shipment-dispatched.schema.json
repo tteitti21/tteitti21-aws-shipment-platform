@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/shipment-dispatched.schema.json",
+  "title": "ShipmentDispatched detail",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "shipment_id",
+    "occurred_at",
+    "request_event_id",
+    "status"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "shipment_id": {
+      "type": "string",
+      "pattern": "^shp_[a-f0-9]+$"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "request_event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "const": "DISPATCHED"
+    }
+  }
+}
+

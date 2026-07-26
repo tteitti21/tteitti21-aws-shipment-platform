@@ -1,0 +1,14 @@
+.deployment.env
+.env
+.git
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+htmlcov
+tests
+infra
+scripts
+examples
+schemas
+

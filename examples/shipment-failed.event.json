@@ -1,0 +1,18 @@
+{
+  "version": "0",
+  "id": "11c31f3d-c0b3-48a7-ac38-6378f8634578",
+  "detail-type": "ShipmentFailed",
+  "source": "shipment-event-platform.worker",
+  "account": "111122223333",
+  "time": "2026-07-26T10:01:00Z",
+  "region": "eu-north-1",
+  "resources": [],
+  "detail": {
+    "event_id": "e908cf1c-a63c-5582-a9db-715599512c96",
+    "shipment_id": "shp_0123456789abcdef",
+    "occurred_at": "2026-07-26T10:01:00Z",
+    "request_event_id": "04d40a6b-8f66-44cc-a70d-432686a43a9c",
+    "status": "FAILED",
+    "reason": "destination is not serviceable"
+  }
+}

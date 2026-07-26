@@ -1,0 +1,23 @@
+{
+  "partner_reference": "partner-order-1234",
+  "origin": {
+    "name": "North Warehouse",
+    "address_line1": "1 Origin Road",
+    "city": "Helsinki",
+    "postal_code": "00100",
+    "country_code": "FI"
+  },
+  "destination": {
+    "name": "South Store",
+    "address_line1": "9 Destination Street",
+    "city": "Turku",
+    "postal_code": "20100",
+    "country_code": "FI"
+  },
+  "packages": [
+    {
+      "weight_kg": "2.50",
+      "description": "Books"
+    }
+  ]
+}

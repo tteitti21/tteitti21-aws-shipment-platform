@@ -1,0 +1,19 @@
+.deployment.env
+.env
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.egg-info/
+*.py[cod]
+coverage.xml
+htmlcov/
+.coverage
+dist/
+build/
+
+# Never commit OAuth credentials or tokens.
+*client-secret*
+*access-token*
+token-response.json
+

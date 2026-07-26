@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/create-shipment.schema.json",
+  "title": "CreateShipment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["partner_reference", "origin", "destination", "packages"],
+  "properties": {
+    "partner_reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "origin": {
+      "$ref": "#/$defs/address"
+    },
+    "destination": {
+      "$ref": "#/$defs/address"
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/package"
+      }
+    }
+  },
+  "$defs": {
+    "address": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "address_line1",
+        "city",
+        "postal_code",
+        "country_code"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "address_line1": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "city": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "postal_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "country_code": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$"
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["weight_kg", "description"],
+      "properties": {
+        "weight_kg": {
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1000
+            },
+            {
+              "type": "string",
+              "pattern": "^(?!0+(?:\\.0+)?$)\\d+(?:\\.\\d+)?$"
+            }
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    }
+  }
+}

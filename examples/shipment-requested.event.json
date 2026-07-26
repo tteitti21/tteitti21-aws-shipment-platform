@@ -1,0 +1,39 @@
+{
+  "version": "0",
+  "id": "98eb8dc3-3889-4ef8-bdc8-118cb3d6a13d",
+  "detail-type": "ShipmentRequested",
+  "source": "shipment-event-platform.api",
+  "account": "111122223333",
+  "time": "2026-07-26T10:00:00Z",
+  "region": "eu-north-1",
+  "resources": [],
+  "detail": {
+    "event_id": "04d40a6b-8f66-44cc-a70d-432686a43a9c",
+    "shipment_id": "shp_0123456789abcdef",
+    "occurred_at": "2026-07-26T10:00:00Z",
+    "partner_reference": "partner-order-123",
+    "request": {
+      "partner_reference": "partner-order-123",
+      "origin": {
+        "name": "North Warehouse",
+        "address_line1": "1 Origin Road",
+        "city": "Helsinki",
+        "postal_code": "00100",
+        "country_code": "FI"
+      },
+      "destination": {
+        "name": "South Store",
+        "address_line1": "9 Destination Street",
+        "city": "Turku",
+        "postal_code": "20100",
+        "country_code": "FI"
+      },
+      "packages": [
+        {
+          "weight_kg": "2.50",
+          "description": "Books"
+        }
+      ]
+    }
+  }
+}

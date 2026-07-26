@@ -1,0 +1,17 @@
+{
+  "version": "0",
+  "id": "19c1dab9-2806-4ef5-a3b5-81b9e284ff2a",
+  "detail-type": "ShipmentDispatched",
+  "source": "shipment-event-platform.worker",
+  "account": "111122223333",
+  "time": "2026-07-26T10:01:00Z",
+  "region": "eu-north-1",
+  "resources": [],
+  "detail": {
+    "event_id": "fa480826-485f-54d0-a537-1da10ba3ba7c",
+    "shipment_id": "shp_0123456789abcdef",
+    "occurred_at": "2026-07-26T10:01:00Z",
+    "request_event_id": "04d40a6b-8f66-44cc-a70d-432686a43a9c",
+    "status": "DISPATCHED"
+  }
+}

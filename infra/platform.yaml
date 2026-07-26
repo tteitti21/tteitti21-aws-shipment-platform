@@ -1,0 +1,904 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Event-driven shipment processing learning platform on ECS Fargate. Uses a
+  public-only VPC layout without NAT gateways; see README security limitations.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: shipment-event-platform
+    AllowedPattern: "^[a-z][a-z0-9-]{2,23}$"
+    Description: Lowercase prefix used for resource names.
+  Environment:
+    Type: String
+    Default: dev
+    AllowedPattern: "^[a-z][a-z0-9-]{1,7}$"
+  ApiImageUri:
+    Type: String
+    AllowedPattern: "^.+\\.dkr\\.ecr\\..+@sha256:[a-f0-9]{64}$"
+    ConstraintDescription: Use an immutable ECR digest URI ending in @sha256:<64 hex characters>.
+  WorkerImageUri:
+    Type: String
+    AllowedPattern: "^.+\\.dkr\\.ecr\\..+@sha256:[a-f0-9]{64}$"
+    ConstraintDescription: Use an immutable ECR digest URI ending in @sha256:<64 hex characters>.
+  ApiDesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 4
+  WorkerDesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 4
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+    AllowedPattern: "^(10)(\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}/(1[6-9]|2[0-8])$"
+  PrimarySubnetCidr:
+    Type: String
+    Default: 10.42.0.0/24
+  AlbSecondarySubnetCidr:
+    Type: String
+    Default: 10.42.1.0/27
+  ShipmentRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 3650
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}"
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PrimaryPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrimarySubnetCidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-primary-public"
+
+  AlbSecondaryPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref AlbSecondarySubnetCidr
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-alb-only-public"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public"
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrimaryRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PrimaryPublicSubnet
+
+  AlbSecondaryRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref AlbSecondaryPublicSubnet
+
+  VpcLinkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: API Gateway VPC Link to the internal ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-vpc-link"
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal ALB accepts only API Gateway VPC Link traffic
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-alb"
+
+  AlbIngressFromVpcLink:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
+      Description: HTTP API private integration traffic
+
+  ApiTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FastAPI tasks accept traffic only from the ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-api-task"
+
+  ApiIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ApiTaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 8000
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: FastAPI ingress from internal ALB only
+
+  WorkerTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Worker has no ingress and HTTPS egress for AWS APIs
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-worker-task"
+
+  ShipmentTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "${ProjectName}-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ShipmentEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ProcessingDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-${Environment}-processing-dlq"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-${Environment}-processing"
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 120
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProcessingDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ShipmentRequestedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-requested"
+      Description: Route ShipmentRequested events to the processing queue.
+      EventBusName: !Ref ShipmentEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - shipment-event-platform.api
+        detail-type:
+          - ShipmentRequested
+      Targets:
+        - Id: ProcessingQueue
+          Arn: !GetAtt ProcessingQueue.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 10
+
+  ProcessingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ProcessingQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgeShipmentRequestedRule
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ProcessingQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt ShipmentRequestedRule.Arn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  ShipmentResultTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-${Environment}-results"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ShipmentResultTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref ShipmentResultTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridgePublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref ShipmentResultTopic
+
+  ShipmentResultRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-results"
+      Description: Route terminal shipment result events to SNS.
+      EventBusName: !Ref ShipmentEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - shipment-event-platform.worker
+        detail-type:
+          - ShipmentDispatched
+          - ShipmentFailed
+      Targets:
+        - Id: ShipmentResultTopic
+          Arn: !Ref ShipmentResultTopic
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 10
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-${Environment}-m2m"
+      DeletionProtection: INACTIVE
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 20
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      UserPoolTags:
+        Project: !Ref ProjectName
+
+  ShipmentApiResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      Identifier: shipment-api
+      Name: Shipment API
+      UserPoolId: !Ref UserPool
+      Scopes:
+        - ScopeName: shipments.write
+          ScopeDescription: Submit shipments.
+        - ScopeName: shipments.read
+          ScopeDescription: Read shipment status.
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: ShipmentApiResourceServer
+    Properties:
+      ClientName: !Sub "${ProjectName}-${Environment}-partner"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - shipment-api/shipments.write
+        - shipment-api/shipments.read
+      AccessTokenValidity: 60
+      TokenValidityUnits:
+        AccessToken: minutes
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "${ProjectName}-${Environment}-${AWS::AccountId}"
+      UserPoolId: !Ref UserPool
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/${Environment}/api"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/${Environment}/worker"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${ProjectName}-${Environment}"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Pulls project images and writes ECS container logs.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EcrPullAndContainerLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrAuthorization
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PullProjectImages
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-*"
+              - Sid: WriteContainerLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt ApiLogGroup.Arn
+                  - !GetAtt WorkerLogGroup.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Runtime permissions for FastAPI; no SQS or SNS access.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApiShipmentData
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ShipmentReadsAndTransactionalWrites
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !GetAtt ShipmentTable.Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - SHIPMENT#*
+                      - IDEMPOTENCY#*
+              - Sid: PublishShipmentRequested
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt ShipmentEventBus.Arn
+                Condition:
+                  StringEquals:
+                    events:source: shipment-event-platform.api
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  WorkerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Runtime permissions for the SQS worker; no SNS direct publish.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkerShipmentProcessing
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ConsumeProcessingQueue
+                Effect: Allow
+                Action:
+                  - sqs:DeleteMessage
+                  - sqs:ReceiveMessage
+                Resource: !GetAtt ProcessingQueue.Arn
+              - Sid: UpdateShipmentState
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt ShipmentTable.Arn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - SHIPMENT#*
+              - Sid: PublishShipmentResults
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt ShipmentEventBus.Arn
+                Condition:
+                  StringEquals:
+                    events:source: shipment-event-platform.worker
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-${Environment}"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-${Environment}-api"
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ApiTaskRole.Arn
+      ContainerDefinitions:
+        - Name: api
+          Image: !Ref ApiImageUri
+          Essential: true
+          StopTimeout: 30
+          PortMappings:
+            - Name: http
+              ContainerPort: 8000
+              Protocol: tcp
+              AppProtocol: http
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: TABLE_NAME
+              Value: !Ref ShipmentTable
+            - Name: EVENT_BUS_NAME
+              Value: !Ref ShipmentEventBus
+            - Name: SHIPMENT_RETENTION_DAYS
+              Value: !Ref ShipmentRetentionDays
+            - Name: LOG_LEVEL
+              Value: INFO
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - >-
+                python -c "import urllib.request;
+                urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+                || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 15
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ApiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-${Environment}-worker"
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt WorkerTaskRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref WorkerImageUri
+          Essential: true
+          StopTimeout: 30
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: TABLE_NAME
+              Value: !Ref ShipmentTable
+            - Name: EVENT_BUS_NAME
+              Value: !Ref ShipmentEventBus
+            - Name: PROCESSING_QUEUE_URL
+              Value: !Ref ProcessingQueue
+            - Name: SHIPMENT_RETENTION_DAYS
+              Value: !Ref ShipmentRetentionDays
+            - Name: SQS_WAIT_TIME_SECONDS
+              Value: "20"
+            - Name: SQS_VISIBILITY_TIMEOUT_SECONDS
+              Value: "120"
+            - Name: LOG_LEVEL
+              Value: INFO
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - PrimaryRouteTableAssociation
+      - AlbSecondaryRouteTableAssociation
+    Properties:
+      Type: application
+      Scheme: internal
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !Ref PrimaryPublicSubnet
+        - !Ref AlbSecondaryPublicSubnet
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: "false"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 8000
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalLoadBalancer
+      Protocol: HTTP
+      Port: 8080
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  ApiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AlbListener
+      - ApiIngressFromAlb
+    Properties:
+      ServiceName: api
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref ApiTaskDefinition
+      DesiredCount: !Ref ApiDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ApiTaskSecurityGroup
+          Subnets:
+            - !Ref PrimaryPublicSubnet
+      LoadBalancers:
+        - ContainerName: api
+          ContainerPort: 8000
+          TargetGroupArn: !Ref ApiTargetGroup
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  WorkerService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: worker
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref WorkerTaskDefinition
+      DesiredCount: !Ref WorkerDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref WorkerTaskSecurityGroup
+          Subnets:
+            - !Ref PrimaryPublicSubnet
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiGatewayVpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    DependsOn: AlbIngressFromVpcLink
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}"
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+      SubnetIds:
+        - !Ref PrimaryPublicSubnet
+      Tags:
+        Project: !Ref ProjectName
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}"
+      Description: JWT-protected machine-to-machine shipment HTTP API.
+      ProtocolType: HTTP
+      DisableExecuteApiEndpoint: false
+      Tags:
+        Project: !Ref ProjectName
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: cognito-m2m
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref UserPoolClient
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${UserPool}"
+
+  AlbIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      Description: Private proxy to internal ALB listener.
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Ref AlbListener
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref ApiGatewayVpcLink
+      PayloadFormatVersion: "1.0"
+      TimeoutInMillis: 29000
+      RequestParameters:
+        overwrite:path: $request.path
+
+  CreateShipmentRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /shipments
+      Target: !Sub "integrations/${AlbIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - shipment-api/shipments.write
+
+  GetShipmentRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /shipments/{id}
+      Target: !Sub "integrations/${AlbIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - shipment-api/shipments.read
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "routeKey":"$context.routeKey","status":"$context.status",
+          "protocol":"$context.protocol","responseLength":"$context.responseLength",
+          "integrationError":"$context.integrationErrorMessage"}
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: false
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+      Tags:
+        Project: !Ref ProjectName
+
+Outputs:
+  ApiUrl:
+    Description: Public API Gateway HTTP API base URL.
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  CognitoTokenUrl:
+    Description: Non-interactive OAuth 2.0 token endpoint.
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
+  CognitoClientId:
+    Description: M2M app client ID. The secret is deliberately not an output.
+    Value: !Ref UserPoolClient
+  CognitoUserPoolId:
+    Description: Cognito user pool ID.
+    Value: !Ref UserPool
+  ProcessingQueueUrl:
+    Description: SQS processing queue URL.
+    Value: !Ref ProcessingQueue
+  DeadLetterQueueUrl:
+    Description: SQS dead-letter queue URL.
+    Value: !Ref ProcessingDeadLetterQueue
+  ShipmentResultTopicArn:
+    Description: SNS topic for ShipmentDispatched and ShipmentFailed events.
+    Value: !Ref ShipmentResultTopic
+  ShipmentTableName:
+    Description: DynamoDB table name.
+    Value: !Ref ShipmentTable
+  EventBusName:
+    Description: Custom EventBridge event bus name.
+    Value: !Ref ShipmentEventBus
+  EcsClusterName:
+    Description: ECS cluster name.
+    Value: !Ref EcsCluster
+  InternalAlbDnsName:
+    Description: Internal-only ALB DNS name for diagnostics from inside the VPC.
+    Value: !GetAtt InternalLoadBalancer.DNSName

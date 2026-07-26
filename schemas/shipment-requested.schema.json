@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/shipment-requested.schema.json",
+  "title": "ShipmentRequested detail",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "shipment_id",
+    "occurred_at",
+    "partner_reference",
+    "request"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "shipment_id": {
+      "type": "string",
+      "pattern": "^shp_[a-f0-9]+$"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "partner_reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "request": {
+      "$ref": "create-shipment.schema.json"
+    }
+  }
+}
+

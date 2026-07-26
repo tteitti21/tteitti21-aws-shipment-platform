@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/shipment-failed.schema.json",
+  "title": "ShipmentFailed detail",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "shipment_id",
+    "occurred_at",
+    "request_event_id",
+    "status",
+    "reason"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "shipment_id": {
+      "type": "string",
+      "pattern": "^shp_[a-f0-9]+$"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "request_event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "const": "FAILED"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    }
+  }
+}
+

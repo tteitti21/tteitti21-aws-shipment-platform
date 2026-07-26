@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Bootstrap resources for shipment-event-platform. Creates immutable, scan-on-push
+  ECR repositories for the API and worker images.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: shipment-event-platform
+    AllowedPattern: "^[a-z][a-z0-9-]{2,23}$"
+    Description: Lowercase project prefix used in repository names.
+
+Resources:
+  ApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-api"
+      EmptyOnDelete: true
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"Keep the 20 newest
+          images","selection":{"tagStatus":"any","countType":"imageCountMoreThan",
+          "countNumber":20},"action":{"type":"expire"}}]}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  WorkerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-worker"
+      EmptyOnDelete: true
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"Keep the 20 newest
+          images","selection":{"tagStatus":"any","countType":"imageCountMoreThan",
+          "countNumber":20},"action":{"type":"expire"}}]}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+  ApiRepositoryName:
+    Description: ECR repository name for the FastAPI image.
+    Value: !Ref ApiRepository
+  ApiRepositoryUri:
+    Description: ECR repository URI for the FastAPI image.
+    Value: !GetAtt ApiRepository.RepositoryUri
+  WorkerRepositoryName:
+    Description: ECR repository name for the worker image.
+    Value: !Ref WorkerRepository
+  WorkerRepositoryUri:
+    Description: ECR repository URI for the worker image.
+    Value: !GetAtt WorkerRepository.RepositoryUri
+
