@@ -66,8 +66,10 @@ that second subnet.
 8. Successful work conditionally changes `PENDING` to `DISPATCHED`; a permanent
    business rejection changes it to `FAILED`. The worker publishes the result
    event and then marks that result as published.
-9. EventBridge routes `ShipmentDispatched` and `ShipmentFailed` to SNS. Result
-   event IDs are deterministic so downstream consumers can deduplicate them.
+9. Separate EventBridge rules route `ShipmentDispatched` and `ShipmentFailed` to
+   SNS. Input transformers replace the raw event envelope with a readable,
+   status-specific email body. Result event IDs remain in the message and are
+   deterministic so downstream consumers can deduplicate them.
 10. `GET /shipments/{id}` requires `shipment-api/shipments.read` and returns the
     strongly consistent DynamoDB status.
 11. A message that remains unsuccessful after three receives is moved by SQS to
@@ -107,7 +109,7 @@ uses a transactional outbox and a publisher service.
 | VPC Link             | Carries API Gateway traffic privately into the VPC.                                                                |
 | Internal ALB         | Health-checks and routes HTTP traffic to IP-mode Fargate API targets.                                              |
 | DynamoDB             | Stores shipment state and idempotency mappings in one on-demand, encrypted table.                                  |
-| EventBridge          | Routes request events to SQS and result events to SNS by source and detail type.                                   |
+| EventBridge          | Routes request events to SQS and transforms result events into readable SNS messages by source and detail type.    |
 | SQS and DLQ          | Buffer work, provide long polling/retries, and isolate messages after three failed receives.                       |
 | SNS                  | Fans terminal results out to independently managed subscribers. The template does not create a subscription.       |
 | CloudWatch Logs      | Retains API, worker, and API Gateway structured logs for seven days by default.                                    |
@@ -291,6 +293,13 @@ API Gateway. **Get status** calls the protected GET route. **Subscribe** calls
 SNS using AWS IAM credentials and the fixed result-topic ARN. AWS sends a
 confirmation email; notifications start only after its link is opened, and
 earlier topic messages are not replayed.
+
+After the platform template update is deployed, result emails contain a
+plain-text status summary rather than the full EventBridge JSON envelope. A
+successful message includes explanatory text, shipment ID, processing time, and
+both event IDs. A failed message also includes the failure reason and suggested
+next steps. SNS still controls the outer email subject and subscription footer;
+the EventBridge input transformer controls the notification body.
 
 Stop the local container with `Ctrl+C`, or:
 

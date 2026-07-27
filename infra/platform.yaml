@@ -319,18 +319,34 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: AllowEventBridgePublish
+          - Sid: AllowDispatchedRulePublish
             Effect: Allow
             Principal:
               Service: events.amazonaws.com
             Action: sns:Publish
             Resource: !Ref ShipmentResultTopic
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt ShipmentResultRule.Arn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowFailedRulePublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref ShipmentResultTopic
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt ShipmentFailedRule.Arn
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
 
   ShipmentResultRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub "${ProjectName}-${Environment}-results"
-      Description: Route terminal shipment result events to SNS.
+      Description: Send readable dispatched-shipment notifications to SNS.
       EventBusName: !Ref ShipmentEventBus
       State: ENABLED
       EventPattern:
@@ -338,10 +354,66 @@ Resources:
           - shipment-event-platform.worker
         detail-type:
           - ShipmentDispatched
+      Targets:
+        - Id: ShipmentResultTopic
+          Arn: !Ref ShipmentResultTopic
+          InputTransformer:
+            InputPathsMap:
+              eventId: "$.detail.event_id"
+              occurredAt: "$.detail.occurred_at"
+              requestEventId: "$.detail.request_event_id"
+              shipmentId: "$.detail.shipment_id"
+            InputTemplate: |
+              "Shipment Event Platform notification"
+              ""
+              "Good news: this shipment completed processing and was dispatched."
+              ""
+              "Status: DISPATCHED"
+              "Shipment ID: <shipmentId>"
+              "Processed at: <occurredAt>"
+              "Result event ID: <eventId>"
+              "Original request event ID: <requestEventId>"
+              ""
+              "You can use the shipment ID in the test console or GET /shipments/{id} to view its current status."
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 10
+
+  ShipmentFailedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-failed-results"
+      Description: Send readable failed-shipment notifications to SNS.
+      EventBusName: !Ref ShipmentEventBus
+      State: ENABLED
+      EventPattern:
+        source:
+          - shipment-event-platform.worker
+        detail-type:
           - ShipmentFailed
       Targets:
         - Id: ShipmentResultTopic
           Arn: !Ref ShipmentResultTopic
+          InputTransformer:
+            InputPathsMap:
+              eventId: "$.detail.event_id"
+              occurredAt: "$.detail.occurred_at"
+              reason: "$.detail.reason"
+              requestEventId: "$.detail.request_event_id"
+              shipmentId: "$.detail.shipment_id"
+            InputTemplate: |
+              "Shipment Event Platform notification"
+              ""
+              "Action may be required: this shipment could not be dispatched."
+              ""
+              "Status: FAILED"
+              "Shipment ID: <shipmentId>"
+              "Processed at: <occurredAt>"
+              "Failure reason: <reason>"
+              "Result event ID: <eventId>"
+              "Original request event ID: <requestEventId>"
+              ""
+              "Look up the shipment in the test console or with GET /shipments/{id}, then inspect the worker logs before deciding whether to retry."
           RetryPolicy:
             MaximumEventAgeInSeconds: 3600
             MaximumRetryAttempts: 10

@@ -1,0 +1,11 @@
+Shipment Event Platform notification
+
+Good news: this shipment completed processing and was dispatched.
+
+Status: DISPATCHED
+Shipment ID: shp_0123456789abcdef
+Processed at: 2026-07-26T10:01:00Z
+Result event ID: fa480826-485f-54d0-a537-1da10ba3ba7c
+Original request event ID: 04d40a6b-8f66-44cc-a70d-432686a43a9c
+
+You can use the shipment ID in the test console or GET /shipments/{id} to view its current status.

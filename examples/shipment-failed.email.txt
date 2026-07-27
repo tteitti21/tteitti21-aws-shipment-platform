@@ -1,0 +1,12 @@
+Shipment Event Platform notification
+
+Action may be required: this shipment could not be dispatched.
+
+Status: FAILED
+Shipment ID: shp_0123456789abcdef
+Processed at: 2026-07-26T10:01:00Z
+Failure reason: destination is not serviceable
+Result event ID: e908cf1c-a63c-5582-a9db-715599512c96
+Original request event ID: 04d40a6b-8f66-44cc-a70d-432686a43a9c
+
+Look up the shipment in the test console or with GET /shipments/{id}, then inspect the worker logs before deciding whether to retry.
