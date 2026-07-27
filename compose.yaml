@@ -49,3 +49,36 @@ services:
       SQS_VISIBILITY_TIMEOUT_SECONDS: ${SQS_VISIBILITY_TIMEOUT_SECONDS:-120}
       SHIPMENT_RETENTION_DAYS: ${SHIPMENT_RETENTION_DAYS:-30}
     stop_grace_period: 30s
+
+  console:
+    profiles: ["console"]
+    image: shipment-event-platform-console:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: docker/console.Dockerfile
+    environment:
+      CONSOLE_API_URL: ${CONSOLE_API_URL:-}
+      CONSOLE_TOKEN_URL: ${CONSOLE_TOKEN_URL:-}
+      CONSOLE_CLIENT_ID: ${CONSOLE_CLIENT_ID:-}
+      CONSOLE_CLIENT_SECRET: ${CONSOLE_CLIENT_SECRET:-}
+      CONSOLE_SCOPES: ${CONSOLE_SCOPES:-shipment-api/shipments.write shipment-api/shipments.read}
+      CONSOLE_REQUEST_TIMEOUT_SECONDS: ${CONSOLE_REQUEST_TIMEOUT_SECONDS:-15}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:8088:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s

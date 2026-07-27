@@ -1,5 +1,6 @@
 .deployment.env
 .env
+.env.console
 .pytest_cache/
 .ruff_cache/
 .venv/
@@ -16,4 +17,3 @@ build/
 *client-secret*
 *access-token*
 token-response.json
-

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Shipment Test Console</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <main>
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">M2M operator tool</p>
+          <h1>Shipment test console</h1>
+          <p class="lede">
+            Request a Cognito token, submit a shipment, and follow its status
+            without exposing credentials to the browser.
+          </p>
+        </div>
+        <div id="configurationBadge" class="badge neutral">Checking configuration</div>
+      </header>
+
+      <section class="status-grid" aria-label="Console status">
+        <article class="status-card">
+          <span>API Gateway</span>
+          <strong id="apiUrl">—</strong>
+        </article>
+        <article class="status-card">
+          <span>Cognito</span>
+          <strong id="tokenHost">—</strong>
+        </article>
+        <article class="status-card">
+          <span>Access token</span>
+          <strong id="tokenState">Not requested</strong>
+        </article>
+      </section>
+
+      <section class="panel token-panel">
+        <div>
+          <p class="section-number">01 / Authenticate</p>
+          <h2>Machine credentials</h2>
+          <p>
+            The backend uses the configured client ID and secret. The browser
+            receives only the token expiry time.
+          </p>
+        </div>
+        <button id="refreshToken" type="button">Get or refresh token</button>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">02 / Submit</p>
+            <h2>Create a shipment</h2>
+          </div>
+          <button id="newKey" class="secondary" type="button">New key</button>
+        </div>
+
+        <form id="shipmentForm">
+          <label for="idempotencyKey">Idempotency-Key</label>
+          <input id="idempotencyKey" name="idempotencyKey" required maxlength="128">
+
+          <label for="shipmentJson">Shipment JSON</label>
+          <textarea id="shipmentJson" name="shipmentJson" required spellcheck="false">{
+  "partner_reference": "partner-order-123",
+  "origin": {
+    "name": "North Warehouse",
+    "address_line1": "1 Origin Road",
+    "city": "Helsinki",
+    "postal_code": "00100",
+    "country_code": "FI"
+  },
+  "destination": {
+    "name": "South Store",
+    "address_line1": "9 Destination Street",
+    "city": "Turku",
+    "postal_code": "20100",
+    "country_code": "FI"
+  },
+  "packages": [
+    {
+      "weight_kg": "2.50",
+      "description": "Books"
+    }
+  ]
+}</textarea>
+
+          <button type="submit">Submit shipment</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div>
+          <p class="section-number">03 / Inspect</p>
+          <h2>Look up status</h2>
+        </div>
+        <form id="lookupForm" class="lookup-form">
+          <label for="shipmentId">Shipment ID</label>
+          <div class="input-action">
+            <input id="shipmentId" name="shipmentId" placeholder="shp_…" required>
+            <button type="submit">Get status</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel result-panel" aria-live="polite">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">Response</p>
+            <h2 id="resultTitle">Ready</h2>
+          </div>
+          <span id="httpStatus" class="status-code">—</span>
+        </div>
+        <pre id="resultBody">Use the controls above to begin.</pre>
+      </section>
+    </main>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

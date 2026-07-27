@@ -1,5 +1,6 @@
 .deployment.env
 .env
+.env.console
 .git
 .pytest_cache
 .venv
@@ -11,4 +12,3 @@ infra
 scripts
 examples
 schemas
-

@@ -133,17 +133,18 @@ SQS and SNS.
 ## Repository layout
 
 ```text
-src/shipment_platform/       FastAPI, models, DynamoDB repository, events, worker
+src/shipment_platform/       FastAPI, models, repository, worker, optional console
 tests/unit/                  Validation, routes, status, idempotency, worker tests
 tests/integration/           Moto-backed DynamoDB, EventBridge, and SQS tests
 infra/bootstrap.yaml         Immutable ECR repositories
 infra/platform.yaml          Complete runtime platform
-docker/                      Python 3.12 non-root API and worker images
+docker/                      Python 3.12 non-root API, worker, and console images
 scripts/bash/                Bash lifecycle commands
 scripts/powershell/          PowerShell lifecycle commands
 schemas/                     Request and event JSON Schemas
 examples/                    Example API request and EventBridge envelopes
-compose.yaml                 Exactly two application services: API and worker
+console.env.example           Safe placeholders for the local test console
+compose.yaml                 API, worker, and optional local console services
 ```
 
 ## Local development and validation
@@ -155,7 +156,7 @@ Python 3.12 is required for the deployment images.
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[test]"
 ./scripts/bash/validate.sh
 ```
 
@@ -164,7 +165,7 @@ python -m pip install -r requirements-dev.txt
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[test]"
 .\scripts\powershell\Validate.ps1
 ```
 
@@ -361,6 +362,91 @@ Requesting only one scope is useful for negative tests: a write-only token gets
 `403` on GET, a read-only token gets `403` on POST, and an absent/invalid token
 gets `401`. The FastAPI container trusts only traffic that reached it through the
 scope-protected API Gateway routes.
+
+## Optional local browser test console
+
+The project includes an optional third **local testing container** that provides
+a GUI for obtaining the M2M token, submitting shipments, and looking up status.
+It is not part of `platform.yaml` and is not deployed to AWS.
+
+The security boundary is intentional:
+
+- Cognito client credentials are environment variables in the console backend.
+- The backend requests and caches the short-lived access token.
+- The browser never receives the client secret or bearer token.
+- The port binds to `127.0.0.1`, so other machines cannot open the console.
+- Console responses and browser storage do not persist credentials.
+
+Copy the placeholder configuration:
+
+```powershell
+Copy-Item .\console.env.example .\.env.console
+```
+
+Fill `.env.console` using:
+
+- CloudFormation → `shipment-event-platform-dev` → **Outputs** for the API URL,
+  token URL, and client ID.
+- Cognito → the deployed user pool → app client for the generated client secret.
+
+`.env.console` is gitignored. Never place its values in
+`console.env.example`.
+
+The easiest startup path reads the stack outputs and Cognito secret into
+temporary process environment variables, without writing them to a file:
+
+```powershell
+.\scripts\powershell\StartConsole.ps1
+```
+
+This requires the same configured AWS CLI identity used for deployment and
+permission to call `cognito-idp:DescribeUserPoolClient`. Docker Desktop must be
+running. After startup, authentication and shipment requests happen entirely
+through the browser GUI.
+
+Alternatively, start from the manually completed `.env.console` file:
+
+```powershell
+docker compose `
+  --env-file .env.console `
+  --profile console `
+  up --build console
+```
+
+Open:
+
+```text
+http://127.0.0.1:8088
+```
+
+The **Get or refresh token** button performs the `client_credentials` request
+server-side. **Submit shipment** forwards the JSON and `Idempotency-Key` through
+API Gateway. **Get status** calls the protected GET route.
+
+Stop the local container with `Ctrl+C`, or:
+
+```powershell
+docker compose `
+  --env-file .env.console `
+  --profile console `
+  stop console
+```
+
+Stopping this container has no effect on the deployed AWS stack.
+
+### Why the console is not deployed to AWS by default
+
+An AWS-hosted version must not be a public, unauthenticated page: its backend
+holds a credential capable of submitting shipments. A safe hosted version would
+need separate operator authentication or private network access, HTTPS, a secret
+in AWS Secrets Manager, narrowly scoped task-role access to that secret, and
+additional monitoring. It would also add Fargate, IPv4, ingress, logging, and
+possibly load-balancer costs.
+
+This does not change the production shipment API's M2M design. Human
+authentication would protect only the separate operator console. For a
+cost-conscious learning deployment, the loopback-only local container is the
+simplest safe option.
 
 ## Structured logs and health
 

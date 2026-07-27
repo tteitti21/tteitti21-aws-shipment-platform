@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
   "boto3>=1.35,<2",
   "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
   "pydantic-settings>=2.7,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
@@ -18,7 +19,6 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "cfn-lint>=1.31,<2",
-  "httpx>=0.28,<1",
   "jsonschema[format]>=4.23,<5",
   "moto[dynamodb,events,sqs]>=5.0,<6",
   "pytest>=8.3,<9",
@@ -27,6 +27,9 @@ test = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+shipment_platform = ["console_static/*"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config -ra"

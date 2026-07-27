@@ -13,6 +13,17 @@ deliberately malformed SQS message, or create an SNS subscription.
 
 Never print, save, or commit the Cognito client secret or access token.
 
+If you prefer a browser GUI for token acquisition, POST, and GET, use the
+optional local console documented under **Optional local browser test console**
+in `README.md`. The commands below remain useful for AWS infrastructure
+diagnostics that the GUI intentionally does not perform.
+
+With Docker Desktop running, the one-command console launcher is:
+
+```powershell
+.\scripts\powershell\StartConsole.ps1
+```
+
 ## 1. Load CloudFormation outputs
 
 Set the deployed stack and region:
@@ -759,4 +770,3 @@ Docker Desktop, or the editor does not stop the deployed AWS resources.
 | Same idempotency key with a different body | `409` |
 | Valid accepted shipment | `202` |
 | Unknown shipment with a valid read token | `404` |
-

@@ -15,6 +15,9 @@ if (-not (Test-Path -LiteralPath $DeploymentFile)) {
 
 $DeploymentValues = @{}
 Get-Content -LiteralPath $DeploymentFile | ForEach-Object {
+    if ($_ -match "^\s*(#|$)") {
+        return
+    }
     $Name, $Value = $_ -split "=", 2
     $DeploymentValues[$Name] = $Value
 }
@@ -44,4 +47,3 @@ aws cloudformation describe-stacks `
     --query "Stacks[0].Outputs" `
     --output table
 if ($LASTEXITCODE -ne 0) { throw "Could not read platform outputs." }
-
