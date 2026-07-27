@@ -5,11 +5,6 @@ processing API. It uses Python 3.12 containers on Amazon ECS/Fargate and raw AWS
 CloudFormation—no SAM, CDK, Terraform, Kubernetes, Lambda, browser login, or
 Cognito users.
 
-> **Cost warning:** deploying this project creates continuously billed Fargate
-> tasks and an Application Load Balancer. Nothing in this repository deploys
-> automatically. Review [Estimated cost](#estimated-cost) and obtain account-owner
-> approval before running a deployment script.
-
 ## Architecture
 
 ```mermaid
@@ -88,17 +83,12 @@ single delivery:
 - Replaying a successful POST republishes the same `ShipmentRequested` event ID.
   This deliberately closes most of the database/EventBridge dual-write failure
   window and can create a duplicate event.
-- The worker processing lease is conditional and expires with the visibility
-  window. Retryable failures release it. Business status transitions are also
-  conditional.
 - A crash after the status update but before result publication is repaired on
   the next delivery. A crash after publication but before the published flag can
   publish the deterministic result event twice.
 - A real carrier adapter must also send `shipment_id` as the downstream
   idempotency key. If processing can exceed 120 seconds, extend both the SQS
   visibility timeout and DynamoDB lease together, ideally with a heartbeat.
-- SNS subscribers must store processed `detail.event_id` values before applying
-  non-idempotent side effects.
 
 The remaining API database/event-bus dual write is intentionally documented
 rather than hidden: if DynamoDB commits, EventBridge fails, and the caller never
@@ -189,17 +179,6 @@ Invoke-RestMethod http://localhost:8000/health
 docker compose down
 ```
 
-Compose contains the API and worker only; it does not silently add an AWS
-emulator. For local POST/worker exercises, point `AWS_ENDPOINT_URL` at an
-explicitly managed local AWS emulator and create the table, bus, and queue there.
-Do not point local containers at a real account casually.
-
-## Deployment order
-
-These commands **create billable AWS resources**. Do not run them until the
-account owner explicitly approves the deployment, region, and expected spend.
-Use a unique image tag such as a Git commit SHA or release identifier.
-
 ### Bash
 
 ```bash
@@ -225,29 +204,6 @@ The push command resolves both pushed tags to ECR digests and writes only the
 immutable URIs to gitignored `.deployment.env`. The platform template independently
 rejects non-digest image parameters.
 
-An optional, account-backed syntax validation (read-only, but it requires AWS
-credentials) is:
-
-```bash
-aws cloudformation validate-template --template-body file://infra/platform.yaml
-```
-
-## CloudFormation outputs
-
-The platform stack returns:
-
-- `ApiUrl`
-- `CognitoTokenUrl`
-- `CognitoClientId` (never the secret)
-- `CognitoUserPoolId`
-- `ProcessingQueueUrl`
-- `DeadLetterQueueUrl`
-- `ShipmentResultTopicArn`
-- `ShipmentTableName`
-- `EventBusName`
-- `EcsClusterName`
-- `InternalAlbDnsName`
-
 ## Obtain a token and call the API
 
 For a complete deployed-platform test sequence—including health, authentication,
@@ -264,105 +220,6 @@ Tokens last 60 minutes. Cache and reuse them until shortly before expiry because
 Cognito bills successful M2M token responses. Never write the client secret,
 token response, or access token to a committed file.
 
-### Bash with curl
-
-```bash
-STACK=shipment-event-platform-dev
-REGION=eu-north-1
-
-API_URL="$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue | [0]" --output text)"
-TOKEN_URL="$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='CognitoTokenUrl'].OutputValue | [0]" --output text)"
-CLIENT_ID="$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='CognitoClientId'].OutputValue | [0]" --output text)"
-USER_POOL_ID="$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
-  --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue | [0]" --output text)"
-CLIENT_SECRET="$(aws cognito-idp describe-user-pool-client --region "$REGION" \
-  --user-pool-id "$USER_POOL_ID" --client-id "$CLIENT_ID" \
-  --query "UserPoolClient.ClientSecret" --output text)"
-
-TOKEN_RESPONSE="$(curl --silent --show-error --fail \
-  --user "${CLIENT_ID}:${CLIENT_SECRET}" \
-  --header "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "grant_type=client_credentials" \
-  --data-urlencode "scope=shipment-api/shipments.write shipment-api/shipments.read" \
-  "$TOKEN_URL")"
-ACCESS_TOKEN="$(printf '%s' "$TOKEN_RESPONSE" |
-  python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
-
-IDEMPOTENCY_KEY="partner-order-123-attempt-1"
-CREATE_RESPONSE="$(curl --silent --show-error --fail \
-  --request POST "${API_URL}/shipments" \
-  --header "Authorization: Bearer ${ACCESS_TOKEN}" \
-  --header "Idempotency-Key: ${IDEMPOTENCY_KEY}" \
-  --header "Content-Type: application/json" \
-  --data @examples/create-shipment.json)"
-printf '%s\n' "$CREATE_RESPONSE"
-
-SHIPMENT_ID="$(printf '%s' "$CREATE_RESPONSE" |
-  python -c 'import json,sys; print(json.load(sys.stdin)["shipment_id"])')"
-curl --silent --show-error --fail \
-  --header "Authorization: Bearer ${ACCESS_TOKEN}" \
-  "${API_URL}/shipments/${SHIPMENT_ID}"
-
-unset CLIENT_SECRET TOKEN_RESPONSE ACCESS_TOKEN
-```
-
-### PowerShell
-
-```powershell
-$Stack = "shipment-event-platform-dev"
-$Region = "eu-north-1"
-
-$ApiUrl = aws cloudformation describe-stacks --region $Region --stack-name $Stack `
-  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue | [0]" --output text
-$TokenUrl = aws cloudformation describe-stacks --region $Region --stack-name $Stack `
-  --query "Stacks[0].Outputs[?OutputKey=='CognitoTokenUrl'].OutputValue | [0]" --output text
-$ClientId = aws cloudformation describe-stacks --region $Region --stack-name $Stack `
-  --query "Stacks[0].Outputs[?OutputKey=='CognitoClientId'].OutputValue | [0]" --output text
-$UserPoolId = aws cloudformation describe-stacks --region $Region --stack-name $Stack `
-  --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue | [0]" --output text
-$ClientSecret = aws cognito-idp describe-user-pool-client --region $Region `
-  --user-pool-id $UserPoolId --client-id $ClientId `
-  --query "UserPoolClient.ClientSecret" --output text
-
-$Basic = [Convert]::ToBase64String(
-  [Text.Encoding]::ASCII.GetBytes("${ClientId}:${ClientSecret}")
-)
-$TokenResponse = Invoke-RestMethod -Method Post -Uri $TokenUrl `
-  -Headers @{ Authorization = "Basic $Basic" } `
-  -ContentType "application/x-www-form-urlencoded" `
-  -Body @{
-    grant_type = "client_credentials"
-    scope = "shipment-api/shipments.write shipment-api/shipments.read"
-  }
-$AccessToken = $TokenResponse.access_token
-
-$CreateResponse = Invoke-RestMethod -Method Post -Uri "$ApiUrl/shipments" `
-  -Headers @{
-    Authorization = "Bearer $AccessToken"
-    "Idempotency-Key" = "partner-order-123-attempt-1"
-  } `
-  -ContentType "application/json" `
-  -Body (Get-Content -Raw .\examples\create-shipment.json)
-$CreateResponse
-
-Invoke-RestMethod -Method Get `
-  -Uri "$ApiUrl/shipments/$($CreateResponse.shipment_id)" `
-  -Headers @{ Authorization = "Bearer $AccessToken" }
-
-$ClientSecret = $null
-$Basic = $null
-$TokenResponse = $null
-$AccessToken = $null
-```
-
-Requesting only one scope is useful for negative tests: a write-only token gets
-`403` on GET, a read-only token gets `403` on POST, and an absent/invalid token
-gets `401`. The FastAPI container trusts only traffic that reached it through the
-scope-protected API Gateway routes.
-
 ## Optional local browser test console
 
 The project includes an optional third **local testing container** that provides
@@ -376,6 +233,22 @@ The security boundary is intentional:
 - The browser never receives the client secret or bearer token.
 - The port binds to `127.0.0.1`, so other machines cannot open the console.
 - Console responses and browser storage do not persist credentials.
+
+The easiest startup path reads the stack outputs and Cognito secret into
+temporary process environment variables, without writing them to a file:
+
+```powershell
+.\scripts\powershell\StartConsole.ps1
+```
+
+This requires the same configured AWS CLI identity used for deployment and
+permission to call `cognito-idp:DescribeUserPoolClient`. Docker Desktop must be
+running. After startup, authentication and shipment requests happen entirely
+through the browser GUI.
+
+---
+
+Alternatively, start from the manually completed `.env.console` file:
 
 Copy the placeholder configuration:
 
@@ -391,20 +264,6 @@ Fill `.env.console` using:
 
 `.env.console` is gitignored. Never place its values in
 `console.env.example`.
-
-The easiest startup path reads the stack outputs and Cognito secret into
-temporary process environment variables, without writing them to a file:
-
-```powershell
-.\scripts\powershell\StartConsole.ps1
-```
-
-This requires the same configured AWS CLI identity used for deployment and
-permission to call `cognito-idp:DescribeUserPoolClient`. Docker Desktop must be
-running. After startup, authentication and shipment requests happen entirely
-through the browser GUI.
-
-Alternatively, start from the manually completed `.env.console` file:
 
 ```powershell
 docker compose `
@@ -433,32 +292,6 @@ docker compose `
 ```
 
 Stopping this container has no effect on the deployed AWS stack.
-
-### Why the console is not deployed to AWS by default
-
-An AWS-hosted version must not be a public, unauthenticated page: its backend
-holds a credential capable of submitting shipments. A safe hosted version would
-need separate operator authentication or private network access, HTTPS, a secret
-in AWS Secrets Manager, narrowly scoped task-role access to that secret, and
-additional monitoring. It would also add Fargate, IPv4, ingress, logging, and
-possibly load-balancer costs.
-
-This does not change the production shipment API's M2M design. Human
-authentication would protect only the separate operator console. For a
-cost-conscious learning deployment, the loopback-only local container is the
-simplest safe option.
-
-## Structured logs and health
-
-Application logs are one-line JSON with timestamp, level, logger, message, and
-available `shipment_id`, EventBridge `event_id`, SQS message ID, or request ID.
-Do not log request authorization headers or Cognito secrets. API Gateway access
-logs also use JSON.
-
-`GET /health` is used by the ECS container check and ALB target group. API
-Gateway has no `/health` route, so it is not a public unauthenticated API method.
-On SIGTERM, the worker stops starting new polls. A 20-second long poll fits
-inside the 30-second ECS/container stop timeout.
 
 ## Simplified-network security and production limitations
 
@@ -498,35 +331,6 @@ For production, use private task subnets across at least two AZs, VPC endpoints
 or controlled NAT egress, TLS on internal hops, WAF/custom domain, Fargate
 autoscaling, PITR/backups, alarms for DLQ depth and service health, secret
 rotation, and a transactional outbox.
-
-## Estimated cost
-
-Prices vary by region and change over time. The following is an illustrative
-US East (N. Virginia) 730-hour month at low traffic, before tax and free-tier
-credits:
-
-| Component                                                        |    Approximate monthly cost |
-| ---------------------------------------------------------------- | --------------------------: |
-| Two continuously running Fargate tasks, each 0.25 vCPU / 0.5 GiB |            about **$18.02** |
-| One ALB hourly charge                                            | about **$16.43**, plus LCUs |
-| Two task public IPv4 addresses                                   |             about **$7.30** |
-| Baseline before requests/log volume                              |      about **$41.75/month** |
-
-Also budget for:
-
-- Cognito M2M successful token responses (the US East example rate is
-  `$0.00225` each; 1,000 new tokens is `$2.25`). Reuse unexpired tokens.
-- API Gateway HTTP API requests and data transfer.
-- EventBridge custom event ingestion (two custom events for a normal shipment),
-  SQS long-poll requests, SNS deliveries, and DynamoDB on-demand reads/writes.
-- CloudWatch log ingestion/storage and ECR image storage.
-- Temporary additional Fargate tasks/public IPv4 addresses during rolling
-  deployments, and any SNS endpoint-specific charge such as SMS.
-
-The ALB and always-on Fargate tasks dominate an idle learning stack. Set both
-desired counts to zero when not exercising compute, but the ALB continues to
-bill until the platform stack is deleted. Use AWS Pricing Calculator for the
-chosen region immediately before deployment.
 
 ## Troubleshooting
 
