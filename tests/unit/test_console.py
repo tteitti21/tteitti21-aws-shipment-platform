@@ -19,7 +19,36 @@ def console_settings() -> ConsoleSettings:
         CONSOLE_SCOPES=(
             "shipment-api/shipments.write shipment-api/shipments.read"
         ),
+        AWS_REGION="eu-north-1",
+        CONSOLE_SNS_TOPIC_ARN=(
+            "arn:aws:sns:eu-north-1:123456789012:"
+            "shipment-event-platform-dev-results"
+        ),
     )
+
+
+class FakeSns:
+    def __init__(self, subscriptions=None) -> None:
+        self.subscriptions = subscriptions or []
+        self.subscribe_calls: list[dict] = []
+
+    def list_subscriptions_by_topic(self, **kwargs):
+        assert kwargs["TopicArn"] == (
+            "arn:aws:sns:eu-north-1:123456789012:"
+            "shipment-event-platform-dev-results"
+        )
+        return {"Subscriptions": self.subscriptions}
+
+    def subscribe(self, **kwargs):
+        self.subscribe_calls.append(kwargs)
+        self.subscriptions.append(
+            {
+                "Protocol": kwargs["Protocol"],
+                "Endpoint": kwargs["Endpoint"],
+                "SubscriptionArn": "PendingConfirmation",
+            }
+        )
+        return {"SubscriptionArn": "PendingConfirmation"}
 
 
 def test_configuration_never_exposes_secret_or_access_token():
@@ -41,6 +70,11 @@ def test_configuration_never_exposes_secret_or_access_token():
     assert "super-secret" not in serialized
     assert "access_token" not in serialized
     assert response.json()["client_id_suffix"] == "123456"
+    assert response.json()["sns_configured"] is True
+    assert response.json()["sns_topic_name"] == (
+        "shipment-event-platform-dev-results"
+    )
+    assert "123456789012" not in serialized
 
 
 def test_refresh_token_uses_basic_auth_but_returns_only_metadata():
@@ -194,3 +228,180 @@ def test_cognito_rejection_is_sanitized():
         "detail": "Cognito token request failed with HTTP 401"
     }
     assert "do-not-relay" not in response.text
+
+
+def test_email_subscription_is_restricted_to_configured_topic():
+    sns = FakeSns()
+    client = TestClient(
+        create_console_app(
+            console_settings(),
+            httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, json={})
+                )
+            ),
+            sns,
+        )
+    )
+
+    response = client.post(
+        "/api/sns/subscriptions",
+        json={"email": "operator@example.com"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "PENDING_CONFIRMATION"
+    assert sns.subscribe_calls == [
+        {
+            "TopicArn": (
+                "arn:aws:sns:eu-north-1:123456789012:"
+                "shipment-event-platform-dev-results"
+            ),
+            "Protocol": "email",
+            "Endpoint": "operator@example.com",
+            "ReturnSubscriptionArn": True,
+        }
+    ]
+
+
+def test_existing_email_subscription_is_not_requested_twice():
+    sns = FakeSns(
+        [
+            {
+                "Protocol": "email",
+                "Endpoint": "operator@example.com",
+                "SubscriptionArn": "PendingConfirmation",
+            }
+        ]
+    )
+    client = TestClient(
+        create_console_app(
+            console_settings(),
+            httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, json={})
+                )
+            ),
+            sns,
+        )
+    )
+
+    response = client.post(
+        "/api/sns/subscriptions",
+        json={"email": "OPERATOR@example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PENDING_CONFIRMATION"
+    assert sns.subscribe_calls == []
+
+
+def test_deleted_email_subscription_can_be_requested_again():
+    sns = FakeSns(
+        [
+            {
+                "Protocol": "email",
+                "Endpoint": "operator@example.com",
+                "SubscriptionArn": "Deleted",
+            }
+        ]
+    )
+    client = TestClient(
+        create_console_app(
+            console_settings(),
+            httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, json={})
+                )
+            ),
+            sns,
+        )
+    )
+
+    listed = client.get("/api/sns/subscriptions")
+    response = client.post(
+        "/api/sns/subscriptions",
+        json={"email": "operator@example.com"},
+    )
+
+    assert listed.json()["subscriptions"] == [
+        {"email": "operator@example.com", "status": "DELETED"}
+    ]
+    assert response.status_code == 202
+    assert response.json()["status"] == "PENDING_CONFIRMATION"
+    assert len(sns.subscribe_calls) == 1
+
+
+def test_subscription_list_returns_only_email_endpoints():
+    sns = FakeSns(
+        [
+            {
+                "Protocol": "email",
+                "Endpoint": "confirmed@example.com",
+                "SubscriptionArn": (
+                    "arn:aws:sns:eu-north-1:123456789012:"
+                    "shipment-event-platform-dev-results:subscription-id"
+                ),
+            },
+            {
+                "Protocol": "sqs",
+                "Endpoint": "arn:aws:sqs:eu-north-1:123456789012:other",
+                "SubscriptionArn": "other-subscription",
+            },
+        ]
+    )
+    client = TestClient(
+        create_console_app(
+            console_settings(),
+            httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, json={})
+                )
+            ),
+            sns,
+        )
+    )
+
+    response = client.get("/api/sns/subscriptions")
+
+    assert response.status_code == 200
+    assert response.json()["subscriptions"] == [
+        {"email": "confirmed@example.com", "status": "CONFIRMED"}
+    ]
+
+
+def test_subscription_requires_valid_email_and_sns_configuration():
+    sns = FakeSns()
+    configured_client = TestClient(
+        create_console_app(
+            console_settings(),
+            httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, json={})
+                )
+            ),
+            sns,
+        )
+    )
+
+    invalid = configured_client.post(
+        "/api/sns/subscriptions",
+        json={"email": "not-an-email"},
+    )
+
+    assert invalid.status_code == 422
+    assert sns.subscribe_calls == []
+
+    unconfigured_client = TestClient(
+        create_console_app(
+            ConsoleSettings(),
+            httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(500, json={})
+                )
+            ),
+        )
+    )
+    missing_topic = unconfigured_client.get("/api/sns/subscriptions")
+
+    assert missing_topic.status_code == 503

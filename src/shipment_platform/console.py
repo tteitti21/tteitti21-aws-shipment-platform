@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -10,7 +11,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import boto3
 import httpx
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, HTTPException, Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +25,7 @@ from shipment_platform.logging import configure_logging
 
 logger = logging.getLogger("shipment_platform.console")
 STATIC_DIR = Path(__file__).with_name("console_static")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class ConsoleSettings(BaseSettings):
@@ -37,6 +41,8 @@ class ConsoleSettings(BaseSettings):
         default="shipment-api/shipments.write shipment-api/shipments.read",
         alias="CONSOLE_SCOPES",
     )
+    aws_region: str = Field(default="eu-north-1", alias="AWS_REGION")
+    sns_topic_arn: str = Field(default="", alias="CONSOLE_SNS_TOPIC_ARN")
     request_timeout_seconds: float = Field(
         default=15, ge=1, le=60, alias="CONSOLE_REQUEST_TIMEOUT_SECONDS"
     )
@@ -62,6 +68,18 @@ class ConsoleSettings(BaseSettings):
             for url in (self.api_url, self.token_url)
         )
 
+    @property
+    def sns_configured(self) -> bool:
+        parts = self.sns_topic_arn.split(":")
+        return (
+            len(parts) == 6
+            and parts[0] == "arn"
+            and parts[2] == "sns"
+            and parts[3] == self.aws_region
+            and bool(parts[4])
+            and bool(parts[5])
+        )
+
 
 class ShipmentSubmission(BaseModel):
     idempotency_key: str = Field(
@@ -76,6 +94,18 @@ class TokenResult(BaseModel):
     token_type: str
     expires_at: datetime
     scopes: str
+
+
+class EmailSubscriptionRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str) -> str:
+        normalized = value.strip()
+        if not EMAIL_PATTERN.fullmatch(normalized):
+            raise ValueError("enter a valid email address")
+        return normalized
 
 
 class TokenManager:
@@ -202,12 +232,14 @@ def _safe_json(response: httpx.Response) -> Any:
 def create_console_app(
     settings: ConsoleSettings | None = None,
     http_client: httpx.Client | None = None,
+    sns_client: Any | None = None,
 ) -> FastAPI:
     settings = settings or ConsoleSettings()
     configure_logging(settings.log_level)
     owns_client = http_client is None
     client = http_client or httpx.Client(timeout=settings.request_timeout_seconds)
     token_manager = TokenManager(settings, client)
+    active_sns_client = sns_client
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -254,6 +286,12 @@ def create_console_app(
             "token_host": urlsplit(settings.token_url).hostname,
             "client_id_suffix": (
                 settings.client_id[-6:] if len(settings.client_id) >= 6 else ""
+            ),
+            "sns_configured": settings.sns_configured,
+            "sns_topic_name": (
+                settings.sns_topic_arn.rsplit(":", 1)[-1]
+                if settings.sns_configured
+                else ""
             ),
             **token_manager.status(),
         }
@@ -329,6 +367,125 @@ def create_console_app(
         response = call_api("GET", f"/shipments/{shipment_id}")
         logger.info("console looked up shipment", extra={"shipment_id": shipment_id})
         return response
+
+    def get_sns_client():
+        nonlocal active_sns_client
+        if not settings.sns_configured:
+            raise HTTPException(
+                status_code=503,
+                detail="SNS controls are not configured for this console",
+            )
+        if active_sns_client is None:
+            active_sns_client = boto3.client("sns", region_name=settings.aws_region)
+        return active_sns_client
+
+    def email_subscriptions() -> list[dict[str, str]]:
+        subscriptions: list[dict[str, str]] = []
+        next_token: str | None = None
+        sns = get_sns_client()
+        try:
+            while True:
+                arguments = {"TopicArn": settings.sns_topic_arn}
+                if next_token:
+                    arguments["NextToken"] = next_token
+                response = sns.list_subscriptions_by_topic(**arguments)
+                for subscription in response.get("Subscriptions", []):
+                    if subscription.get("Protocol") != "email":
+                        continue
+                    subscription_arn = subscription.get(
+                        "SubscriptionArn", "PendingConfirmation"
+                    )
+                    if subscription_arn == "PendingConfirmation":
+                        status = "PENDING_CONFIRMATION"
+                    elif subscription_arn == "Deleted":
+                        status = "DELETED"
+                    else:
+                        status = "CONFIRMED"
+                    subscriptions.append(
+                        {
+                            "email": subscription.get("Endpoint", ""),
+                            "status": status,
+                        }
+                    )
+                next_token = response.get("NextToken")
+                if not next_token:
+                    break
+        except (BotoCoreError, ClientError) as error:
+            logger.warning("SNS subscriptions could not be listed")
+            raise HTTPException(
+                status_code=502,
+                detail="SNS subscriptions could not be listed",
+            ) from error
+        return subscriptions
+
+    @application.get("/api/sns/subscriptions")
+    def list_sns_subscriptions() -> dict[str, Any]:
+        return {
+            "topic": settings.sns_topic_arn.rsplit(":", 1)[-1],
+            "subscriptions": email_subscriptions(),
+        }
+
+    @application.post("/api/sns/subscriptions")
+    def create_sns_subscription(
+        request: EmailSubscriptionRequest,
+    ) -> JSONResponse:
+        existing = next(
+            (
+                subscription
+                for subscription in email_subscriptions()
+                if (
+                    subscription["email"].casefold() == request.email.casefold()
+                    and subscription["status"] != "DELETED"
+                )
+            ),
+            None,
+        )
+        if existing:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    **existing,
+                    "message": (
+                        "Subscription already exists. Check your email if "
+                        "confirmation is still pending."
+                    ),
+                },
+            )
+
+        try:
+            response = get_sns_client().subscribe(
+                TopicArn=settings.sns_topic_arn,
+                Protocol="email",
+                Endpoint=request.email,
+                ReturnSubscriptionArn=True,
+            )
+        except (BotoCoreError, ClientError) as error:
+            logger.warning("SNS email subscription request failed")
+            raise HTTPException(
+                status_code=502,
+                detail="SNS email subscription request failed",
+            ) from error
+
+        subscription_arn = response.get(
+            "SubscriptionArn", "PendingConfirmation"
+        )
+        status = (
+            "PENDING_CONFIRMATION"
+            if subscription_arn == "PendingConfirmation"
+            else "CONFIRMED"
+        )
+        logger.info("SNS email subscription requested")
+        return JSONResponse(
+            status_code=202 if status == "PENDING_CONFIRMATION" else 200,
+            content={
+                "email": request.email,
+                "status": status,
+                "message": (
+                    "AWS sent a confirmation email. The subscription receives "
+                    "events only after its confirmation link is opened."
+                ),
+            },
+        )
 
     application.mount(
         "/assets",

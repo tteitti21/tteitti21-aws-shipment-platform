@@ -34,6 +34,10 @@
           <span>Access token</span>
           <strong id="tokenState">Not requested</strong>
         </article>
+        <article class="status-card">
+          <span>SNS result topic</span>
+          <strong id="snsTopic">—</strong>
+        </article>
       </section>
 
       <section class="panel token-panel">
@@ -102,17 +106,51 @@
             <button type="submit">Get status</button>
           </div>
         </form>
+        <p class="inline-hint">The latest API response appears directly below.</p>
       </section>
 
-      <section class="panel result-panel" aria-live="polite">
+      <section id="resultPanel" class="panel result-panel" aria-live="polite">
         <div class="panel-heading">
           <div>
-            <p class="section-number">Response</p>
+            <p class="section-number">Latest response</p>
             <h2 id="resultTitle">Ready</h2>
           </div>
           <span id="httpStatus" class="status-code">—</span>
         </div>
         <pre id="resultBody">Use the controls above to begin.</pre>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-number">04 / Subscribe</p>
+            <h2>SNS result notifications</h2>
+            <p>
+              Request an email subscription to the fixed shipment-result topic.
+              AWS sends a confirmation email before notifications begin.
+            </p>
+          </div>
+          <button id="refreshSubscriptions" class="secondary" type="button">
+            Refresh list
+          </button>
+        </div>
+        <form id="subscriptionForm">
+          <label for="subscriptionEmail">Email address</label>
+          <div class="input-action">
+            <input
+              id="subscriptionEmail"
+              name="subscriptionEmail"
+              type="email"
+              autocomplete="email"
+              placeholder="you@example.com"
+              required
+            >
+            <button type="submit">Subscribe</button>
+          </div>
+        </form>
+        <ul id="subscriptionList" class="subscription-list">
+          <li class="empty">No email subscriptions loaded.</li>
+        </ul>
       </section>
     </main>
     <script src="/assets/app.js" defer></script>

@@ -223,28 +223,33 @@ token response, or access token to a committed file.
 ## Optional local browser test console
 
 The project includes an optional third **local testing container** that provides
-a GUI for obtaining the M2M token, submitting shipments, and looking up status.
-It is not part of `platform.yaml` and is not deployed to AWS.
+a GUI for obtaining the M2M token, submitting shipments, looking up status, and
+requesting an SNS email subscription. It is not part of `platform.yaml` and is
+not deployed to AWS.
 
 The security boundary is intentional:
 
 - Cognito client credentials are environment variables in the console backend.
 - The backend requests and caches the short-lived access token.
 - The browser never receives the client secret or bearer token.
+- SNS actions are fixed to the stack's result topic and email protocol.
 - The port binds to `127.0.0.1`, so other machines cannot open the console.
 - Console responses and browser storage do not persist credentials.
 
-The easiest startup path reads the stack outputs and Cognito secret into
-temporary process environment variables, without writing them to a file:
+The easiest startup path reads the stack outputs, Cognito secret, and active AWS
+CLI credentials into temporary process environment variables, without writing
+them to a file:
 
 ```powershell
 .\scripts\powershell\StartConsole.ps1
 ```
 
-This requires the same configured AWS CLI identity used for deployment and
-permission to call `cognito-idp:DescribeUserPoolClient`. Docker Desktop must be
-running. After startup, authentication and shipment requests happen entirely
-through the browser GUI.
+This requires a configured AWS CLI identity with
+`cognito-idp:DescribeUserPoolClient`, `sns:Subscribe`, and
+`sns:ListSubscriptionsByTopic` permissions. Docker Desktop must be running.
+After startup, authentication, shipment requests, and email subscription
+requests happen through the browser GUI. If the active AWS CLI session expires,
+restart the console launcher to pass fresh credentials into the container.
 
 ---
 
@@ -259,11 +264,13 @@ Copy-Item .\console.env.example .\.env.console
 Fill `.env.console` using:
 
 - CloudFormation → `shipment-event-platform-dev` → **Outputs** for the API URL,
-  token URL, and client ID.
+  token URL, client ID, and result-topic ARN.
 - Cognito → the deployed user pool → app client for the generated client secret.
 
 `.env.console` is gitignored. Never place its values in
-`console.env.example`.
+`console.env.example`. Manual SNS controls also require AWS SDK credentials in
+the Compose process environment; do not store long-lived AWS keys in
+`.env.console`.
 
 ```powershell
 docker compose `
@@ -280,7 +287,10 @@ http://127.0.0.1:8088
 
 The **Get or refresh token** button performs the `client_credentials` request
 server-side. **Submit shipment** forwards the JSON and `Idempotency-Key` through
-API Gateway. **Get status** calls the protected GET route.
+API Gateway. **Get status** calls the protected GET route. **Subscribe** calls
+SNS using AWS IAM credentials and the fixed result-topic ARN. AWS sends a
+confirmation email; notifications start only after its link is opened, and
+earlier topic messages are not replayed.
 
 Stop the local container with `Ctrl+C`, or:
 

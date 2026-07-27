@@ -14,7 +14,12 @@ $EnvironmentNames = @(
     "CONSOLE_TOKEN_URL",
     "CONSOLE_CLIENT_ID",
     "CONSOLE_CLIENT_SECRET",
-    "CONSOLE_SCOPES"
+    "CONSOLE_SCOPES",
+    "CONSOLE_SNS_TOPIC_ARN",
+    "AWS_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN"
 )
 $PreviousValues = @{}
 
@@ -40,6 +45,7 @@ try {
     $env:CONSOLE_API_URL = Get-StackOutput "ApiUrl"
     $env:CONSOLE_TOKEN_URL = Get-StackOutput "CognitoTokenUrl"
     $env:CONSOLE_CLIENT_ID = Get-StackOutput "CognitoClientId"
+    $env:CONSOLE_SNS_TOPIC_ARN = Get-StackOutput "ShipmentResultTopicArn"
     $UserPoolId = Get-StackOutput "CognitoUserPoolId"
 
     $env:CONSOLE_CLIENT_SECRET = aws cognito-idp describe-user-pool-client `
@@ -59,9 +65,28 @@ try {
     $env:CONSOLE_SCOPES = (
         "shipment-api/shipments.write shipment-api/shipments.read"
     )
+    $env:AWS_REGION = $AwsRegion
+
+    $CredentialJson = aws configure export-credentials --format process
+    if ($LASTEXITCODE -ne 0 -or -not $CredentialJson) {
+        throw "Could not export temporary credentials from the active AWS CLI session."
+    }
+    try {
+        $Credentials = $CredentialJson | ConvertFrom-Json
+    }
+    catch {
+        throw "AWS CLI returned an invalid credential response."
+    }
+    if (-not $Credentials.AccessKeyId -or -not $Credentials.SecretAccessKey) {
+        throw "AWS CLI did not return usable temporary credentials."
+    }
+    $env:AWS_ACCESS_KEY_ID = $Credentials.AccessKeyId
+    $env:AWS_SECRET_ACCESS_KEY = $Credentials.SecretAccessKey
+    $env:AWS_SESSION_TOKEN = $Credentials.SessionToken
 
     Write-Host "Starting the local shipment console at http://127.0.0.1:8088"
     Write-Host "The Cognito client secret and access token are never sent to the browser."
+    Write-Host "SNS controls are restricted to email on the stack's result topic."
 
     $ComposeArguments = @(
         "compose",
@@ -95,4 +120,6 @@ finally {
         )
     }
     $UserPoolId = $null
+    $CredentialJson = $null
+    $Credentials = $null
 }
