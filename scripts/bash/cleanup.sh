@@ -8,7 +8,7 @@ PLATFORM_STACK="${PLATFORM_STACK:-${PROJECT_NAME}-${ENVIRONMENT}}"
 BOOTSTRAP_STACK="${BOOTSTRAP_STACK:-${PROJECT_NAME}-bootstrap}"
 
 if [[ "${CONFIRM:-}" != "DELETE" ]]; then
-  echo "Cleanup deletes DynamoDB data, queues, logs, and ECR images." >&2
+  echo "Cleanup deletes DynamoDB data, queues, archived events, logs, and ECR images." >&2
   echo "Run with CONFIRM=DELETE to continue." >&2
   exit 2
 fi
@@ -28,4 +28,3 @@ aws cloudformation wait stack-delete-complete \
   --stack-name "${BOOTSTRAP_STACK}"
 
 echo "Deleted ${PLATFORM_STACK} and ${BOOTSTRAP_STACK}."
-

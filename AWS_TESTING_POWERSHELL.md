@@ -9,7 +9,8 @@ cd C:\aws-shipment-event-platform
 
 Most sections are read-only or create normal test shipments. Sections explicitly
 marked **optional/state-changing** temporarily change an ECS desired count, send a
-deliberately malformed SQS message, or create an SNS subscription.
+deliberately malformed SQS message, create an SNS subscription, or replay
+archived shipment requests.
 
 Never print, save, or commit the Cognito client secret or access token.
 
@@ -58,6 +59,9 @@ $TableName    = Get-StackOutput "ShipmentTableName"
 $ClusterName  = Get-StackOutput "EcsClusterName"
 $TopicArn     = Get-StackOutput "ShipmentResultTopicArn"
 $EventBusName = Get-StackOutput "EventBusName"
+$ArchiveName  = Get-StackOutput "ShipmentRequestArchiveName"
+$ArchiveArn   = Get-StackOutput "ShipmentRequestArchiveArn"
+$RequestRule  = Get-StackOutput "ShipmentRequestedRuleArn"
 ```
 
 Display the non-secret resource identifiers:
@@ -74,6 +78,9 @@ Display the non-secret resource identifiers:
     ClusterName  = $ClusterName
     TopicArn     = $TopicArn
     EventBusName = $EventBusName
+    ArchiveName  = $ArchiveName
+    ArchiveArn   = $ArchiveArn
+    RequestRule  = $RequestRule
 } | Format-List
 ```
 
@@ -742,7 +749,67 @@ aws sns unsubscribe `
     --subscription-arn $SubscriptionArn
 ```
 
-## 20. Clear credentials from PowerShell memory
+## 20. Optional/state-changing: replay archived shipment requests
+
+The archive begins collecting `ShipmentRequested` events only after the
+CloudFormation archive resource is deployed. Submit a normal test shipment, then
+wait at least ten minutes before replaying its time window.
+
+Inspect the archive:
+
+```powershell
+aws events describe-archive `
+    --region $Region `
+    --archive-name $ArchiveName `
+    --query "{State:State,RetentionDays:RetentionDays,EventCount:EventCount,SizeBytes:SizeBytes}" `
+    --output table
+```
+
+`EventCount` and `SizeBytes` can take up to 24 hours to reconcile, so zero in
+those summary fields does not always mean the newest event is absent.
+
+Choose a narrow UTC window around the shipment submission and start the replay:
+
+```powershell
+$ReplayEnd = (Get-Date).ToUniversalTime()
+$ReplayStart = $ReplayEnd.AddMinutes(-30)
+$ReplayName = "shipment-requests-$((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss'))"
+
+.\scripts\powershell\ReplayShipmentRequests.ps1 `
+    -StartTime $ReplayStart `
+    -EndTime $ReplayEnd `
+    -ReplayName $ReplayName `
+    -Confirm REPLAY
+```
+
+The script obtains the archive, event-bus, and request-rule ARNs from the stack.
+It passes only the request rule in `FilterArns`, so the replay enters the SQS
+processing path and is not sent directly to the SNS result rules.
+
+Inspect asynchronous replay progress:
+
+```powershell
+aws events describe-replay `
+    --region $Region `
+    --replay-name $ReplayName `
+    --query "{State:State,Reason:StateReason,LastEventTime:EventLastReplayedTime}" `
+    --output table
+```
+
+Expected final state:
+
+```text
+COMPLETED
+```
+
+For an already completed shipment, the worker should log that the duplicate is
+already complete and delete the SQS message without running dispatch again. If
+the original shipment was incomplete, replay can resume its processing.
+
+The caller needs `cloudformation:DescribeStacks`, `events:DescribeArchive`,
+`events:StartReplay`, and `events:DescribeReplay`.
+
+## 21. Clear credentials from PowerShell memory
 
 Remove sensitive variables:
 

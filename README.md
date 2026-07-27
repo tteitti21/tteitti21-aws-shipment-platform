@@ -22,6 +22,8 @@ flowchart LR
     G --> L
     API -->|"transactional create / read"| D[("DynamoDB")]
     API -->|"ShipmentRequested"| E["Custom EventBridge bus"]
+    E -->|"archive ShipmentRequested"| AR["EventBridge request archive<br/>7-day default retention"]
+    AR -.->|"controlled replay"| E
     E -->|"requested rule"| Q["SQS processing queue"]
     Q -->|"after 3 unsuccessful receives"| DLQ["SQS DLQ"]
     Q --> W
@@ -56,24 +58,26 @@ that second subnet.
    DynamoDB transaction to write the `PENDING` shipment plus a separate
    idempotency-key record. The key is bound to a canonical SHA-256 request hash.
 5. The API publishes `ShipmentRequested` to the custom EventBridge bus and
-   returns HTTP `202`. A same-key/same-body replay returns the original shipment.
-   A same-key/different-body replay returns `409`.
-6. EventBridge matches the request event and sends its full envelope to SQS. The
+    returns HTTP `202`. A same-key/same-body replay returns the original shipment.
+    A same-key/different-body replay returns `409`.
+6. The EventBridge archive stores a copy of each original `ShipmentRequested`
+   event for seven days by default. It does not archive result or replayed events.
+7. EventBridge matches the request event and sends its full envelope to SQS. The
    queue uses 20-second long polling and a 120-second visibility timeout.
-7. The worker receives one message and conditionally acquires a DynamoDB
+8. The worker receives one message and conditionally acquires a DynamoDB
    processing lease. A concurrent duplicate cannot run the processor. A
    retryable exception releases the lease and leaves the message undeleted.
-8. Successful work conditionally changes `PENDING` to `DISPATCHED`; a permanent
+9. Successful work conditionally changes `PENDING` to `DISPATCHED`; a permanent
    business rejection changes it to `FAILED`. The worker publishes the result
    event and then marks that result as published.
-9. Separate EventBridge rules route `ShipmentDispatched` and `ShipmentFailed` to
-   SNS. Input transformers replace the raw event envelope with a readable,
-   status-specific email body. Result event IDs remain in the message and are
-   deterministic so downstream consumers can deduplicate them.
-10. `GET /shipments/{id}` requires `shipment-api/shipments.read` and returns the
-    strongly consistent DynamoDB status.
-11. A message that remains unsuccessful after three receives is moved by SQS to
-    the DLQ. Inspect and repair it before redriving it.
+10. Separate EventBridge rules route `ShipmentDispatched` and `ShipmentFailed`
+    to SNS. Input transformers replace the raw event envelope with a readable,
+    status-specific email body. Result event IDs remain in the message and are
+    deterministic so downstream consumers can deduplicate them.
+11. `GET /shipments/{id}` requires `shipment-api/shipments.read` and returns the
+     strongly consistent DynamoDB status.
+12. A message that remains unsuccessful after three receives is moved by SQS to
+     the DLQ. Inspect and repair it before redriving it.
 
 ### At-least-once and failure safety
 
@@ -97,6 +101,72 @@ rather than hidden: if DynamoDB commits, EventBridge fails, and the caller never
 retries the same key, the shipment stays `PENDING`. A production design normally
 uses a transactional outbox and a publisher service.
 
+### Event archive and replay
+
+The archive is historical event storage, not another work queue:
+
+- SQS holds work that is waiting to be processed now.
+- The DLQ isolates messages that repeatedly failed processing.
+- The EventBridge archive retains original request events so an operator can
+  deliberately resend a selected time window later.
+
+`ShipmentRequestArchive` in `infra/platform.yaml` uses four important
+properties:
+
+- `SourceArn` attaches the archive to this project's custom event bus.
+- `EventPattern` accepts only events from `shipment-event-platform.api` whose
+  detail type is `ShipmentRequested`.
+- `RetentionDays` references `EventArchiveRetentionDays`, which defaults to
+  seven and can be changed during deployment.
+- `ArchiveName` gives the resource a stable, recognizable console name.
+
+Only events published after the archive has been deployed can be replayed.
+EventBridge may take a short time to archive a new event; AWS recommends waiting
+ten minutes before replaying a time window. Replays add a `replay-name` metadata
+field, and EventBridge automatically prevents replayed events from being
+archived again.
+
+The replay scripts read the archive, bus, and request-rule ARNs from
+CloudFormation outputs. They set `FilterArns` to `ShipmentRequestedRule`, so
+replayed requests go only to the SQS processing path. They do not target the SNS
+result rules. The scripts also require the literal confirmation `REPLAY`.
+
+PowerShell:
+
+```powershell
+$EndTime = (Get-Date).ToUniversalTime()
+$StartTime = $EndTime.AddMinutes(-30)
+
+.\scripts\powershell\ReplayShipmentRequests.ps1 `
+    -StartTime $StartTime `
+    -EndTime $EndTime `
+    -Confirm REPLAY
+```
+
+Bash:
+
+```bash
+CONFIRM=REPLAY ./scripts/bash/replay-shipment-requests.sh \
+  2026-07-27T12:00:00Z \
+  2026-07-27T12:30:00Z
+```
+
+Starting or inspecting a replay is an operator action, not an ECS task action.
+The AWS identity running the script needs `cloudformation:DescribeStacks`,
+`events:StartReplay`, and `events:DescribeReplay`. Replays are asynchronous and
+events are not guaranteed to be resent in their original order.
+
+For an already terminal shipment, the worker recognizes the deterministic
+request event and stored state, avoids dispatching it again, and deletes the SQS
+message once the result is known to be published. For an incomplete shipment, a
+replay can repair the processing path. A future real carrier integration must
+honor `shipment_id` as its own idempotency key for the same guarantee.
+
+Archive processing, retained bytes, and replayed custom events are usage-based.
+At this project's small event volume, that should be negligible compared with
+the continuously running ALB and Fargate tasks. Retention is bounded so forgotten
+events do not remain indefinitely.
+
 ## AWS services
 
 | Service              | Purpose                                                                                                            |
@@ -109,7 +179,7 @@ uses a transactional outbox and a publisher service.
 | VPC Link             | Carries API Gateway traffic privately into the VPC.                                                                |
 | Internal ALB         | Health-checks and routes HTTP traffic to IP-mode Fargate API targets.                                              |
 | DynamoDB             | Stores shipment state and idempotency mappings in one on-demand, encrypted table.                                  |
-| EventBridge          | Routes request events to SQS and transforms result events into readable SNS messages by source and detail type.    |
+| EventBridge          | Routes events, retains requests for controlled replay, and transforms result events into readable SNS messages.    |
 | SQS and DLQ          | Buffer work, provide long polling/retries, and isolate messages after three failed receives.                       |
 | SNS                  | Fans terminal results out to independently managed subscribers. The template does not create a subscription.       |
 | CloudWatch Logs      | Retains API, worker, and API Gateway structured logs for seven days by default.                                    |
@@ -397,6 +467,13 @@ Inspect the message body and `ApproximateReceiveCount`, fix the processor or
 schema problem, and redrive only after verifying that processing is idempotent.
 Malformed events intentionally fail until SQS moves them after three receives.
 
+**A replay completes but no event is processed**
+
+Confirm the selected UTC window contains an event created after the archive was
+deployed, wait at least ten minutes after publishing a new event, and inspect the
+replay with `aws events describe-replay`. Also confirm the worker service is
+running and inspect the processing queue and worker logs.
+
 **Cleanup stack deletion fails**
 
 Delete external SNS subscriptions or resources that reference stack resources,
@@ -406,7 +483,8 @@ also permanently removes its images.
 ## Cleanup
 
 Cleanup deletes the DynamoDB table and shipment data, both queues and their
-messages, logs, Cognito resources, and ECR images. It cannot be undone.
+messages, the request archive and archived events, logs, Cognito resources, and
+ECR images. It cannot be undone.
 
 ```bash
 CONFIRM=DELETE ./scripts/bash/cleanup.sh
@@ -425,5 +503,6 @@ delete the bootstrap/ECR stack. Both cleanup scripts enforce that order.
 - [Cognito M2M scopes and resource servers](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-define-resource-servers.html)
 - [API Gateway private ALB integration](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-private.html)
 - [EventBridge resource-based policies](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-use-resource-based.html)
+- [EventBridge archive and replay](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-archive.html)
 - [DynamoDB transaction IAM authorization](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html)
 - [ALB subnet requirements](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html)

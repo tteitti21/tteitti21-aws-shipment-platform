@@ -50,6 +50,12 @@ Parameters:
     Type: Number
     Default: 7
     AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90]
+  EventArchiveRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 365
+    Description: Days to retain ShipmentRequested events for operator-initiated replay.
 
 Resources:
   Vpc:
@@ -238,6 +244,19 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
+
+  ShipmentRequestArchive:
+    Type: AWS::Events::Archive
+    Properties:
+      ArchiveName: !Sub "${ProjectName}-${Environment}-requests"
+      Description: Retain original shipment requests for controlled, idempotent replay.
+      EventPattern:
+        source:
+          - shipment-event-platform.api
+        detail-type:
+          - ShipmentRequested
+      RetentionDays: !Ref EventArchiveRetentionDays
+      SourceArn: !GetAtt ShipmentEventBus.Arn
 
   ProcessingDeadLetterQueue:
     Type: AWS::SQS::Queue
@@ -968,6 +987,18 @@ Outputs:
   EventBusName:
     Description: Custom EventBridge event bus name.
     Value: !Ref ShipmentEventBus
+  EventBusArn:
+    Description: Custom EventBridge event bus ARN used as the replay destination.
+    Value: !GetAtt ShipmentEventBus.Arn
+  ShipmentRequestArchiveName:
+    Description: Archive containing only original ShipmentRequested events.
+    Value: !Ref ShipmentRequestArchive
+  ShipmentRequestArchiveArn:
+    Description: EventBridge archive ARN used to start controlled replays.
+    Value: !GetAtt ShipmentRequestArchive.Arn
+  ShipmentRequestedRuleArn:
+    Description: Processing rule ARN used to prevent replay delivery to unrelated rules.
+    Value: !GetAtt ShipmentRequestedRule.Arn
   EcsClusterName:
     Description: ECS cluster name.
     Value: !Ref EcsCluster

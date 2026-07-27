@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-Write-Warning "Deleting DynamoDB data, queues, logs, and ECR images."
+Write-Warning "Deleting DynamoDB data, queues, archived events, logs, and ECR images."
 
 aws cloudformation delete-stack --region $AwsRegion --stack-name $PlatformStack
 if ($LASTEXITCODE -ne 0) { throw "Could not start platform deletion." }
@@ -24,4 +24,3 @@ aws cloudformation wait stack-delete-complete --region $AwsRegion --stack-name $
 if ($LASTEXITCODE -ne 0) { throw "Bootstrap deletion did not complete." }
 
 Write-Host "Deleted $PlatformStack and $BootstrapStack."
-
