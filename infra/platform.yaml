@@ -3,6 +3,25 @@ Description: >-
   Event-driven shipment processing learning platform on ECS Fargate. Uses a
   public-only VPC layout without NAT gateways; see README security limitations.
 
+# Template navigation:
+#   1. Parameters
+#   2. Networking
+#   3. Security groups
+#   4. Data and eventing
+#   5. Machine-to-machine authentication
+#   6. CloudWatch log groups
+#   7. IAM roles
+#   8. ECS cluster and task definitions
+#   9. Load balancer and ECS services
+#  10. Worker auto scaling
+#  11. API Gateway
+#  12. Outputs
+
+# =============================================================================
+# 1. PARAMETERS
+# Names, immutable container images, capacity limits, CIDRs, and retention.
+# =============================================================================
+
 Parameters:
   ProjectName:
     Type: String
@@ -59,6 +78,11 @@ Parameters:
     Description: Days to retain ShipmentRequested events for operator-initiated replay.
 
 Resources:
+# =============================================================================
+# 2. NETWORKING
+# VPC, public subnets, internet gateway, route table, and associations.
+# =============================================================================
+
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
@@ -133,6 +157,12 @@ Resources:
     Properties:
       RouteTableId: !Ref PublicRouteTable
       SubnetId: !Ref AlbSecondaryPublicSubnet
+
+# =============================================================================
+# 3. SECURITY GROUPS
+# One-way ingress chain: API Gateway VPC Link -> internal ALB -> API task.
+# The worker has no ingress; both task groups allow only HTTPS egress.
+# =============================================================================
 
   VpcLinkSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -213,6 +243,11 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-worker-task"
+
+# =============================================================================
+# 4. DATA AND EVENTING
+# DynamoDB, custom EventBridge bus/archive/rules, SQS/DLQ, and SNS.
+# =============================================================================
 
   ShipmentTable:
     Type: AWS::DynamoDB::Table
@@ -438,6 +473,11 @@ Resources:
             MaximumEventAgeInSeconds: 3600
             MaximumRetryAttempts: 10
 
+# =============================================================================
+# 5. MACHINE-TO-MACHINE AUTHENTICATION
+# Cognito resource server, client-credentials app client, scopes, and domain.
+# =============================================================================
+
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -492,6 +532,11 @@ Resources:
       Domain: !Sub "${ProjectName}-${Environment}-${AWS::AccountId}"
       UserPoolId: !Ref UserPool
 
+# =============================================================================
+# 6. CLOUDWATCH LOG GROUPS
+# Structured logs for the API, worker, and API Gateway access records.
+# =============================================================================
+
   ApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -518,6 +563,11 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
+
+# =============================================================================
+# 7. IAM ROLES
+# ECS image/log execution permissions and separate least-privilege task roles.
+# =============================================================================
 
   TaskExecutionRole:
     Type: AWS::IAM::Role
@@ -639,6 +689,11 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
+# =============================================================================
+# 8. ECS CLUSTER AND TASK DEFINITIONS
+# Fargate cluster plus API and long-polling worker container definitions.
+# =============================================================================
+
   EcsCluster:
     Type: AWS::ECS::Cluster
     Properties:
@@ -751,6 +806,11 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
+
+# =============================================================================
+# 9. LOAD BALANCER AND ECS SERVICES
+# Internal ALB, target health, listener, and the API and worker services.
+# =============================================================================
 
   InternalLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -867,6 +927,11 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
+# =============================================================================
+# 10. WORKER AUTO SCALING
+# Queue-driven scale-out from zero and in-flight-aware return to zero.
+# =============================================================================
+
   WorkerScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Properties:
@@ -979,6 +1044,11 @@ Resources:
       AlarmActions:
         - !Ref WorkerScaleInPolicy
 
+# =============================================================================
+# 11. API GATEWAY
+# VPC Link, HTTP API, Cognito JWT authorizer, ALB integration, routes, and stage.
+# =============================================================================
+
   ApiGatewayVpcLink:
     Type: AWS::ApiGatewayV2::VpcLink
     DependsOn: AlbIngressFromVpcLink
@@ -1071,6 +1141,11 @@ Resources:
         ThrottlingRateLimit: 10
       Tags:
         Project: !Ref ProjectName
+
+# =============================================================================
+# 12. OUTPUTS
+# Non-secret endpoints and resource identifiers used by operators and scripts.
+# =============================================================================
 
 Outputs:
   ApiUrl:
