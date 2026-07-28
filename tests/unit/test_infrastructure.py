@@ -88,3 +88,35 @@ def test_powershell_replay_uses_culture_independent_aws_timestamps() -> None:
 
     assert "[Globalization.CultureInfo]::InvariantCulture" in powershell
     assert "\"yyyy-MM-dd'T'HH:mm:ss'Z'\"" in powershell
+
+
+def test_worker_scales_from_zero_when_the_queue_has_messages() -> None:
+    template = PLATFORM_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "WorkerDesiredCount" not in template
+    assert "WorkerMaxCount:" in template
+    assert "MinCapacity: 0" in template
+    assert "DesiredCount: 0" in template
+    assert "MetricName: ApproximateNumberOfMessagesVisible" in template
+    assert "ComparisonOperator: GreaterThanOrEqualToThreshold" in template
+    assert "Threshold: 1" in template
+    assert "AdjustmentType: ChangeInCapacity" in template
+    assert "ScalingAdjustment: 1" in template
+
+
+def test_worker_scale_in_counts_in_flight_messages_before_stopping() -> None:
+    template = PLATFORM_TEMPLATE.read_text(encoding="utf-8")
+    scale_in_policy = template.split(
+        "  WorkerScaleInPolicy:", maxsplit=1
+    )[1].split("\n  WorkerQueueHasMessagesAlarm:", maxsplit=1)[0]
+    scale_in_alarm = template.split(
+        "  WorkerQueueIsIdleAlarm:", maxsplit=1
+    )[1].split("\n  ApiGatewayVpcLink:", maxsplit=1)[0]
+
+    assert "ApproximateNumberOfMessagesVisible" in scale_in_alarm
+    assert "ApproximateNumberOfMessagesNotVisible" in scale_in_alarm
+    assert "Expression: visible + in_flight" in scale_in_alarm
+    assert "EvaluationPeriods: 5" in scale_in_alarm
+    assert "DatapointsToAlarm: 5" in scale_in_alarm
+    assert "MetricIntervalUpperBound: 0" in scale_in_policy
+    assert "ScalingAdjustment: 0" in scale_in_policy

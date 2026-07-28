@@ -16,7 +16,7 @@ flowchart LR
     subgraph VPC["VPC — public-only learning layout"]
         L["API Gateway VPC Link"] --> A["Internal ALB"]
         A --> API["Fargate API task<br/>FastAPI"]
-        W["Fargate worker task<br/>SQS long poll"]
+        W["Fargate worker tasks<br/>SQS long poll<br/>0-4 by default"]
     end
 
     G --> L
@@ -27,6 +27,9 @@ flowchart LR
     E -->|"requested rule"| Q["SQS processing queue"]
     Q -->|"after 3 unsuccessful receives"| DLQ["SQS DLQ"]
     Q --> W
+    Q -.->|"visible + in-flight metrics"| CA["CloudWatch scaling alarms"]
+    CA -->|"step policies"| AS["ECS Service Auto Scaling"]
+    AS -->|"desired count"| W
     W -->|"conditional lease + status update"| D
     W -->|"ShipmentDispatched / ShipmentFailed"| E
     E -->|"result rule"| S["SNS result topic"]
@@ -63,8 +66,10 @@ that second subnet.
 6. The EventBridge archive stores a copy of each original `ShipmentRequested`
    event for seven days by default. It does not archive result or replayed events.
 7. EventBridge matches the request event and sends its full envelope to SQS. The
-   queue uses 20-second long polling and a 120-second visibility timeout.
-8. The worker receives one message and conditionally acquires a DynamoDB
+   queue uses 20-second long polling and a 120-second visibility timeout. A
+   CloudWatch alarm sees visible work and Application Auto Scaling starts one or
+   more worker tasks from an idle desired count of zero.
+8. A worker receives one message and conditionally acquires a DynamoDB
    processing lease. A concurrent duplicate cannot run the processor. A
    retryable exception releases the lease and leaves the message undeleted.
 9. Successful work conditionally changes `PENDING` to `DISPATCHED`; a permanent
@@ -167,13 +172,53 @@ At this project's small event volume, that should be negligible compared with
 the continuously running ALB and Fargate tasks. Retention is bounded so forgotten
 events do not remain indefinitely.
 
+### Worker auto scaling from zero
+
+`WorkerService` starts with `DesiredCount: 0`; zero means the ECS service exists
+but no worker container is currently billed as running. Four CloudFormation
+resources connect queue demand to that desired count:
+
+1. `WorkerScalableTarget` registers `ecs:service:DesiredCount` with Application
+   Auto Scaling. Its allowed range is zero through `WorkerMaxCount` (four by
+   default).
+2. `WorkerQueueHasMessagesAlarm` samples SQS
+   `ApproximateNumberOfMessagesVisible` once per minute. At one or more visible
+   messages it invokes `WorkerScaleOutPolicy`.
+3. The scale-out step policy adds one task for 1-4 messages, two for 5-9, and
+   four for 10 or more. A three-minute scale-out cooldown limits repeated cold
+   start decisions, and ECS clamps total capacity to `WorkerMaxCount`.
+4. `WorkerQueueIsIdleAlarm` adds visible messages to
+   `ApproximateNumberOfMessagesNotVisible`, which represents messages currently
+   held by workers. Only five consecutive zero-work minutes invoke
+   `WorkerScaleInPolicy`, which returns desired capacity to zero.
+
+Counting in-flight messages on scale-in is the important safety condition. A
+worker makes its received message invisible while processing it; checking only
+visible messages could otherwise stop that worker in the middle of the job.
+The worker also receives up to the Fargate maximum 120-second stop timeout and
+handles `SIGTERM`, providing time to finish or safely leave an undeleted message
+for retry.
+
+This is deliberately step scaling instead of CPU scaling: an idle queue can need
+work while CPU is zero because no container exists. The trade-off is cold-start
+latency. SQS publishes the metric, CloudWatch evaluates it, ECS schedules
+Fargate, and the image starts, so the first idle-period shipment commonly waits
+roughly one to three minutes. It still returns HTTP `202` immediately and stays
+`PENDING` during that wait.
+
+Updating this CloudFormation stack reapplies the worker's initial
+`DesiredCount: 0` before its scaling policies respond. Deploy platform changes
+during a quiet queue; production systems normally use a deployment process that
+coordinates desired capacity with the autoscaler.
+
 ## AWS services
 
 | Service              | Purpose                                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | CloudFormation       | Defines both stacks in reviewable raw YAML.                                                                        |
 | ECR                  | Stores separately built API and worker images; tags are immutable and deploys require digest URIs.                 |
-| ECS and Fargate      | Run the two long-lived containers without managing EC2 hosts.                                                      |
+| ECS and Fargate      | Run the API and queue-driven worker containers without managing EC2 hosts.                                         |
+| Application Auto Scaling | Changes the worker ECS desired count between zero and the configured maximum.                                  |
 | API Gateway HTTP API | Public API endpoint, JWT validation, per-route OAuth scope enforcement, throttling, and access logs.               |
 | Cognito user pool    | OAuth 2.0 authorization server with one resource server and a secret-bearing M2M app client. No users are created. |
 | VPC Link             | Carries API Gateway traffic privately into the VPC.                                                                |
@@ -182,7 +227,7 @@ events do not remain indefinitely.
 | EventBridge          | Routes events, retains requests for controlled replay, and transforms result events into readable SNS messages.    |
 | SQS and DLQ          | Buffer work, provide long polling/retries, and isolate messages after three failed receives.                       |
 | SNS                  | Fans terminal results out to independently managed subscribers. The template does not create a subscription.       |
-| CloudWatch Logs      | Retains API, worker, and API Gateway structured logs for seven days by default.                                    |
+| CloudWatch           | Retains structured logs and evaluates the two SQS worker-scaling alarms.                                            |
 | IAM                  | Separates the ECS execution role from narrow API and worker task roles.                                            |
 
 The API task role can only read/put this DynamoDB table and call `PutEvents` on
@@ -405,9 +450,9 @@ What it does **not** provide:
   destination allowlist.
 - The API Gateway-to-ALB and ALB-to-container hops use HTTP inside the VPC.
 - The ALB's mandatory second subnet has no tasks, so this is not multi-AZ compute.
-- There is no AWS WAF, custom domain, ACM certificate, automatic scaling,
-  CloudWatch alarms, tracing, DynamoDB PITR, cross-region recovery, or automated
-  DLQ redrive.
+- There is no AWS WAF, custom domain, ACM certificate, tracing, DynamoDB PITR,
+  cross-region recovery, or automated DLQ redrive. The only CloudWatch alarms
+  are worker scaling controls; they are not operational notifications.
 - The result SNS topic uses service-managed transport security but no customer
   managed KMS key. Subscribers are outside this stack.
 - One Cognito app client represents the example partner. Production onboarding
@@ -417,9 +462,22 @@ What it does **not** provide:
   outbox.
 
 For production, use private task subnets across at least two AZs, VPC endpoints
-or controlled NAT egress, TLS on internal hops, WAF/custom domain, Fargate
-autoscaling, PITR/backups, alarms for DLQ depth and service health, secret
-rotation, and a transactional outbox.
+or controlled NAT egress, TLS on internal hops, WAF/custom domain, a
+backlog-per-task scaling policy tuned from measured processing time, PITR/backups,
+operational alarms for DLQ depth and service health, secret rotation, and a
+transactional outbox.
+
+### Cost behavior
+
+Scaling the worker to zero removes its idle Fargate compute and public IPv4
+charges. When work arrives, those charges resume for each running worker. The
+two CloudWatch alarms add a small continuous monitoring cost. The API task,
+internal ALB, API Gateway VPC Link, and other retained resources are unaffected,
+so this does not make the whole stack scale to zero or become purely
+pay-per-request. AWS credits and Free Tier eligibility vary by account and
+eventually expire; set an AWS Budget and billing alerts rather than treating the
+worker policy as a spending cap. `WorkerMaxCount` limits concurrency, not total
+spend.
 
 ## Troubleshooting
 
@@ -458,8 +516,18 @@ same `Idempotency-Key`.
 
 **Shipment remains PENDING**
 
-Inspect the EventBridge rule metrics, processing queue depth, worker ECS events,
-and worker logs. Check that the request event ID matches the DynamoDB item.
+For an idle service, allow roughly one to three minutes for the SQS metric and
+Fargate cold start. Then inspect both worker scaling alarms, the Application Auto
+Scaling activity history, processing queue depth, worker ECS events, and worker
+logs. Check that the request event ID matches the DynamoDB item.
+
+**Worker does not start from zero**
+
+Confirm the scale-out alarm sees at least one visible SQS message and its alarm
+action is enabled. Inspect Application Auto Scaling activities for a rejected
+capacity change. On the first deployment, the deploying identity may also need
+`iam:CreateServiceLinkedRole` so AWS can create
+`AWSServiceRoleForApplicationAutoScaling_ECSService`.
 
 **Messages reach the DLQ**
 
@@ -506,3 +574,5 @@ delete the bootstrap/ECR stack. Both cleanup scripts enforce that order.
 - [EventBridge archive and replay](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-archive.html)
 - [DynamoDB transaction IAM authorization](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis-iam.html)
 - [ALB subnet requirements](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html)
+- [ECS Service Auto Scaling](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html)
+- [ECS queue-based scaling guidance](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/capacity-autoscaling-best-practice.html)

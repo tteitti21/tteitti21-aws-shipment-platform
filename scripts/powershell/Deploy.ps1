@@ -39,7 +39,15 @@ aws cloudformation deploy `
         "ApiImageUri=$ApiImageUri" `
         "WorkerImageUri=$WorkerImageUri" `
     --no-fail-on-empty-changeset
-if ($LASTEXITCODE -ne 0) { throw "Platform deployment failed." }
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Platform deployment failed. Recent failed resources:"
+    aws cloudformation describe-stack-events `
+        --region $AwsRegion `
+        --stack-name $PlatformStack `
+        --query "StackEvents[?contains(ResourceStatus, 'FAILED')].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason] | [0:10]" `
+        --output table
+    throw "Platform deployment failed."
+}
 
 aws cloudformation describe-stacks `
     --region $AwsRegion `

@@ -26,11 +26,12 @@ Parameters:
     Default: 1
     MinValue: 0
     MaxValue: 4
-  WorkerDesiredCount:
+  WorkerMaxCount:
     Type: Number
-    Default: 1
-    MinValue: 0
-    MaxValue: 4
+    Default: 4
+    MinValue: 1
+    MaxValue: 10
+    Description: Maximum number of queue-driven worker tasks; idle capacity is zero.
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
@@ -723,7 +724,7 @@ Resources:
         - Name: worker
           Image: !Ref WorkerImageUri
           Essential: true
-          StopTimeout: 30
+          StopTimeout: 120
           Environment:
             - Name: AWS_REGION
               Value: !Ref AWS::Region
@@ -847,7 +848,7 @@ Resources:
       ServiceName: worker
       Cluster: !Ref EcsCluster
       TaskDefinition: !Ref WorkerTaskDefinition
-      DesiredCount: !Ref WorkerDesiredCount
+      DesiredCount: 0
       LaunchType: FARGATE
       PlatformVersion: LATEST
       EnableECSManagedTags: true
@@ -865,6 +866,118 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
+
+  WorkerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 0
+      MaxCapacity: !Ref WorkerMaxCount
+      ResourceId: !Join
+        - /
+        - - service
+          - !Ref EcsCluster
+          - !GetAtt WorkerService.Name
+      RoleARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  WorkerScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-${Environment}-worker-scale-out"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref WorkerScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 180
+        MetricAggregationType: Maximum
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 4
+            ScalingAdjustment: 1
+          - MetricIntervalLowerBound: 4
+            MetricIntervalUpperBound: 9
+            ScalingAdjustment: 2
+          - MetricIntervalLowerBound: 9
+            ScalingAdjustment: 4
+
+  WorkerScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-${Environment}-worker-scale-in"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref WorkerScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ExactCapacity
+        Cooldown: 300
+        MetricAggregationType: Maximum
+        StepAdjustments:
+          # Bounds are relative to the alarm threshold. For scale-in, an upper
+          # bound of zero includes a metric value exactly at the zero threshold.
+          - MetricIntervalUpperBound: 0
+            ScalingAdjustment: 0
+
+  WorkerQueueHasMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-worker-queue-has-messages"
+      AlarmDescription: Starts worker capacity when the processing queue has visible work.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ProcessingQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref WorkerScaleOutPolicy
+
+  WorkerQueueIsIdleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-worker-queue-is-idle"
+      AlarmDescription: >-
+        Stops worker capacity only after visible and in-flight processing work
+        have both remained at zero for five minutes.
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: visible
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt ProcessingQueue.QueueName
+            Period: 60
+            Stat: Maximum
+          ReturnData: false
+        - Id: in_flight
+          MetricStat:
+            Metric:
+              Namespace: AWS/SQS
+              MetricName: ApproximateNumberOfMessagesNotVisible
+              Dimensions:
+                - Name: QueueName
+                  Value: !GetAtt ProcessingQueue.QueueName
+            Period: 60
+            Stat: Maximum
+          ReturnData: false
+        - Id: total_work
+          Expression: visible + in_flight
+          Label: Visible plus in-flight processing messages
+          ReturnData: true
+      AlarmActions:
+        - !Ref WorkerScaleInPolicy
 
   ApiGatewayVpcLink:
     Type: AWS::ApiGatewayV2::VpcLink
@@ -1002,6 +1115,15 @@ Outputs:
   EcsClusterName:
     Description: ECS cluster name.
     Value: !Ref EcsCluster
+  WorkerServiceName:
+    Description: ECS worker service controlled by queue-driven auto scaling.
+    Value: !GetAtt WorkerService.Name
+  WorkerScaleOutAlarmName:
+    Description: CloudWatch alarm that starts or increases worker capacity.
+    Value: !Ref WorkerQueueHasMessagesAlarm
+  WorkerScaleInAlarmName:
+    Description: CloudWatch alarm that returns idle worker capacity to zero.
+    Value: !Ref WorkerQueueIsIdleAlarm
   InternalAlbDnsName:
     Description: Internal-only ALB DNS name for diagnostics from inside the VPC.
     Value: !GetAtt InternalLoadBalancer.DNSName

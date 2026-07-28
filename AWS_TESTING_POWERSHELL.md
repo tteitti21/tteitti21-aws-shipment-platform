@@ -8,8 +8,8 @@ cd C:\aws-shipment-event-platform
 ```
 
 Most sections are read-only or create normal test shipments. Sections explicitly
-marked **optional/state-changing** temporarily change an ECS desired count, send a
-deliberately malformed SQS message, create an SNS subscription, or replay
+marked **optional/state-changing** temporarily change the API ECS desired count,
+send a deliberately malformed SQS message, create an SNS subscription, or replay
 archived shipment requests.
 
 Never print, save, or commit the Cognito client secret or access token.
@@ -62,6 +62,9 @@ $EventBusName = Get-StackOutput "EventBusName"
 $ArchiveName  = Get-StackOutput "ShipmentRequestArchiveName"
 $ArchiveArn   = Get-StackOutput "ShipmentRequestArchiveArn"
 $RequestRule  = Get-StackOutput "ShipmentRequestedRuleArn"
+$WorkerService = Get-StackOutput "WorkerServiceName"
+$ScaleOutAlarm = Get-StackOutput "WorkerScaleOutAlarmName"
+$ScaleInAlarm  = Get-StackOutput "WorkerScaleInAlarmName"
 ```
 
 Display the non-secret resource identifiers:
@@ -81,6 +84,9 @@ Display the non-secret resource identifiers:
     ArchiveName  = $ArchiveName
     ArchiveArn   = $ArchiveArn
     RequestRule  = $RequestRule
+    WorkerService = $WorkerService
+    ScaleOutAlarm = $ScaleOutAlarm
+    ScaleInAlarm  = $ScaleInAlarm
 } | Format-List
 ```
 
@@ -119,8 +125,27 @@ aws ecs describe-services `
     --output table
 ```
 
-Normally both services should be `ACTIVE`, with desired count `1`, running count
-`1`, and pending count `0`.
+The API normally has desired/running count `1`. The worker remains `ACTIVE`, but
+after an idle period its desired/running count should be `0`. It starts
+automatically when SQS contains visible work.
+
+Inspect the worker's scalable range:
+
+```powershell
+aws application-autoscaling describe-scalable-targets `
+    --region $Region `
+    --service-namespace ecs `
+    --resource-ids "service/$ClusterName/$WorkerService" `
+    --query "ScalableTargets[].{
+        Minimum:MinCapacity,
+        Maximum:MaxCapacity,
+        Suspended:SuspendedState
+    }" `
+    --output table
+```
+
+The expected minimum is `0`, the default maximum is `4`, and dynamic scaling
+should not be suspended.
 
 List the running tasks:
 
@@ -593,47 +618,93 @@ catch {
 
 The expected response is HTTP `403`.
 
-## 16. Optional/state-changing: pause the worker to observe `PENDING`
+## 16. Test worker auto scaling from zero
 
-Set only the worker desired count to zero:
-
-```powershell
-aws ecs update-service `
-    --region $Region `
-    --cluster $ClusterName `
-    --service worker `
-    --desired-count 0
-
-aws ecs wait services-stable `
-    --region $Region `
-    --cluster $ClusterName `
-    --services worker
-```
-
-Submit a new shipment with a new idempotency key. It should remain `PENDING`, and
-the processing queue should contain approximately one message.
-
-Restore the worker:
+First wait until the queue has no visible or in-flight messages. The scale-in
+alarm requires five consecutive idle minutes, after which the worker should show
+desired/running count `0`:
 
 ```powershell
-aws ecs update-service `
+aws cloudwatch describe-alarms `
     --region $Region `
-    --cluster $ClusterName `
-    --service worker `
-    --desired-count 1
+    --alarm-names $ScaleOutAlarm $ScaleInAlarm `
+    --query "MetricAlarms[].{
+        Alarm:AlarmName,
+        State:StateValue,
+        Reason:StateReason
+    }" `
+    --output table
 
-aws ecs wait services-stable `
+aws ecs describe-services `
     --region $Region `
     --cluster $ClusterName `
-    --services worker
+    --services $WorkerService `
+    --query "services[0].{
+        Desired:desiredCount,
+        Running:runningCount,
+        Pending:pendingCount
+    }" `
+    --output table
 ```
 
-The queued shipment should then become `DISPATCHED`. Restore the desired count to
-`1` after this test.
+Now submit a normal shipment using section 6 with a fresh
+`Idempotency-Key`. The POST still returns `202`; status may remain `PENDING`
+during the cold start. Watch the alarm and service for up to five minutes:
 
-## 17. Optional/state-changing: pause both services to reduce Fargate cost
+```powershell
+1..20 | ForEach-Object {
+    $AlarmState = aws cloudwatch describe-alarms `
+        --region $Region `
+        --alarm-names $ScaleOutAlarm `
+        --query "MetricAlarms[0].StateValue" `
+        --output text
 
-Stop the running Fargate tasks without deleting the stack:
+    $WorkerState = aws ecs describe-services `
+        --region $Region `
+        --cluster $ClusterName `
+        --services $WorkerService `
+        --query "services[0].{
+            Desired:desiredCount,
+            Running:runningCount,
+            Pending:pendingCount
+        }" `
+        --output json
+
+    Write-Host "$(Get-Date -Format T) alarm=$AlarmState worker=$WorkerState"
+    Start-Sleep -Seconds 15
+}
+```
+
+Expected order:
+
+1. SQS reports at least one visible message.
+2. The scale-out alarm becomes `ALARM`.
+3. Application Auto Scaling changes desired count from zero to one (or more for
+   a backlog).
+4. ECS moves the task through `PENDING` to `RUNNING`.
+5. The shipment becomes `DISPATCHED` and the queue drains.
+6. Once visible and in-flight messages have both remained zero for five minutes,
+   the scale-in policy returns desired count to zero.
+
+The first item after an idle period commonly takes roughly one to three minutes.
+This is expected scale-from-zero cold-start latency, not an API failure.
+
+Inspect scaling decisions if the expected transition does not happen:
+
+```powershell
+aws application-autoscaling describe-scaling-activities `
+    --region $Region `
+    --service-namespace ecs `
+    --resource-id "service/$ClusterName/$WorkerService" `
+    --scalable-dimension ecs:service:DesiredCount `
+    --max-results 10 `
+    --output table
+```
+
+## 17. Optional/state-changing: pause the API to reduce Fargate cost
+
+The worker already scales itself to zero after five idle minutes. Stop the
+always-on API task without deleting the stack:
 
 ```powershell
 aws ecs update-service `
@@ -641,15 +712,9 @@ aws ecs update-service `
     --cluster $ClusterName `
     --service api `
     --desired-count 0
-
-aws ecs update-service `
-    --region $Region `
-    --cluster $ClusterName `
-    --service worker `
-    --desired-count 0
 ```
 
-Restore both services later:
+Restore the API later:
 
 ```powershell
 aws ecs update-service `
@@ -658,21 +723,16 @@ aws ecs update-service `
     --service api `
     --desired-count 1
 
-aws ecs update-service `
-    --region $Region `
-    --cluster $ClusterName `
-    --service worker `
-    --desired-count 1
-
 aws ecs wait services-stable `
     --region $Region `
     --cluster $ClusterName `
-    --services api worker
+    --services api
 ```
 
-While both services are at zero, Fargate compute charges stop, but the ALB, VPC
-Link, storage, and other provisioned resources may still incur charges. Manual
-scaling also causes temporary CloudFormation drift until the counts are restored.
+While the API and idle worker are both at zero, Fargate compute charges stop.
+Queued messages can still wake the worker. The ALB, VPC Link, CloudWatch alarms,
+storage, and other provisioned resources may still incur charges. Manual API
+scaling also causes temporary CloudFormation drift until it is restored.
 
 ## 18. Optional/state-changing: test SQS redrive to the DLQ
 
