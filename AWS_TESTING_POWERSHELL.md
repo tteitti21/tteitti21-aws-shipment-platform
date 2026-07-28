@@ -1,5 +1,35 @@
 # AWS-Side Testing Guide (PowerShell)
 
+## Guide index
+
+Use the links to jump directly to a section. The line numbers make the same
+sections easy to locate in an editor; links remain more reliable after edits.
+
+| Section | Instructions | Starts at line |
+| ---: | --- | ---: |
+| 1 | [Load CloudFormation outputs](#1-load-cloudformation-outputs) | 58 |
+| 2 | [Check the CloudFormation stack and ECS services](#2-check-the-cloudformation-stack-and-ecs-services) | 123 |
+| 3 | [Check the internal ALB target](#3-check-the-internal-alb-target) | 190 |
+| 4 | [Verify API Gateway rejects an unauthenticated request](#4-verify-that-api-gateway-rejects-an-unauthenticated-request) | 221 |
+| 5 | [Obtain a machine-to-machine access token](#5-obtain-a-machine-to-machine-access-token) | 232 |
+| 6 | [Optionally follow logs while testing](#6-optionally-follow-logs-while-testing) | 282 |
+| 7 | [Submit a shipment](#7-submit-a-shipment) | 314 |
+| 8 | [Poll the shipment status](#8-poll-the-shipment-status) | 357 |
+| 9 | [Inspect the shipment in DynamoDB](#9-inspect-the-shipment-in-dynamodb) | 387 |
+| 10 | [Search recent logs for the shipment](#10-search-recent-logs-for-the-shipment) | 444 |
+| 11 | [Check the processing queue and DLQ](#11-check-the-processing-queue-and-dlq) | 475 |
+| 12 | [Test an idempotent replay](#12-test-an-idempotent-replay) | 504 |
+| 13 | [Test an idempotency conflict](#13-test-an-idempotency-conflict) | 533 |
+| 14 | [Test request validation](#14-test-request-validation) | 565 |
+| 15 | [Test OAuth scope enforcement](#15-test-oauth-scope-enforcement) | 598 |
+| 16 | [Test worker auto scaling from zero](#16-test-worker-auto-scaling-from-zero) | 651 |
+| 17 | [Pause the API to reduce Fargate cost](#17-optionalstate-changing-pause-the-api-to-reduce-fargate-cost) | 734 |
+| 18 | [Test SQS redrive to the DLQ](#18-optionalstate-changing-test-sqs-redrive-to-the-dlq) | 767 |
+| 19 | [Create an SNS email subscription](#19-optionalstate-changing-create-an-sns-email-subscription) | 805 |
+| 20 | [Replay archived shipment requests](#20-optionalstate-changing-replay-archived-shipment-requests) | 842 |
+| 21 | [Clear credentials from PowerShell memory](#21-clear-credentials-from-powershell-memory) | 902 |
+| Result | [Expected HTTP results](#expected-http-results) | 920 |
+
 This guide tests the deployed `shipment-event-platform` from PowerShell. Run the
 commands from the project root:
 
